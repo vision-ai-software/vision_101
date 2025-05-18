@@ -1,1 +1,1 @@
-"# vision_101" 
+# Vision 101 Implementation.

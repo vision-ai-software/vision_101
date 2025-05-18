@@ -1,0 +1,7 @@
+steps:
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args: ['echo', 'Hello, Cloud Build! Placeholder for build steps.']
+
+# Placeholder for future deployment steps, e.g., to Cloud Run
+# images:
+#   - 'gcr.io/$PROJECT_ID/csa-agent-backend:$COMMIT_SHA' 

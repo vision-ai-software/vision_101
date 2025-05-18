@@ -1,0 +1,28 @@
+{
+  "name": "vision_101",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vision-ai-software/vision_101.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/vision-ai-software/vision_101/issues"
+  },
+  "homepage": "https://github.com/vision-ai-software/vision_101#readme",
+  "dependencies": {
+    "@google-cloud/aiplatform": "^4.2.0",
+    "@google-cloud/language": "^7.0.2",
+    "express": "^5.1.0",
+    "langchain": "^0.3.26",
+    "pg": "^8.16.0"
+  }
+}

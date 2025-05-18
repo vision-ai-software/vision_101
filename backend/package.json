@@ -1,0 +1,27 @@
+{
+  "name": "csa-agent-backend",
+  "version": "0.0.1",
+  "description": "Backend for the Vision AI Customer Support Automation Agent",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "ai",
+    "customer-support",
+    "automation",
+    "nodejs",
+    "express",
+    "langchain"
+  ],
+  "author": "Vision AI",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.17.1"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.15"
+  }
+} 
