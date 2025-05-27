@@ -20,9 +20,17 @@
   "homepage": "https://github.com/vision-ai-software/vision_101#readme",
   "dependencies": {
     "@google-cloud/aiplatform": "^4.2.0",
+    "@google-cloud/firestore": "^7.11.1",
     "@google-cloud/language": "^7.0.2",
+    "@google/generative-ai": "^0.24.1",
+    "@langchain/core": "^0.3.56",
+    "@langchain/google-vertexai": "^0.2.9",
+    "@langchain/langgraph": "^0.1.20",
+    "@langchain/openai": "^0.2.5",
+    "@langchain/community": "^0.2.20",
     "express": "^5.1.0",
     "langchain": "^0.3.26",
+    "langsmith": "^0.1.90",
     "pg": "^8.16.0"
   }
 }
