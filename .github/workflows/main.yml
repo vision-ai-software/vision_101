@@ -1,0 +1,51 @@
+name: Build and Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - main # Or your deployment branch, e.g., master, release/*
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write' # Required for Workload Identity Federation
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: 'google-github-actions/auth@v2'
+        with:
+          workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}'
+          service_account: '${{ secrets.GCP_SERVICE_ACCOUNT }}'
+          # create_credentials_file: true # Not needed for gcloud CLI typically with WIF
+          # access_token_lifetime: '300s'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Submit build to Google Cloud Build
+        run: |
+          gcloud builds submit . \
+            --config=infrastructure/cloudbuild.yaml \
+            --substitutions=COMMIT_SHA=${{ github.sha }} \
+            # Add other substitutions here, pulling from GitHub secrets
+            # For example, if you have a _DB_HOST in cloudbuild.yaml that needs a secret:
+            # _DB_HOST='${{ secrets.DB_HOST_SECRET }}',\
+            # _DB_USER='${{ secrets.DB_USER_SECRET }}'
+            # Note: Ensure these secrets are defined in your GitHub repository settings
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }} # Making project ID available if needed by gcloud implicitly
+
+      # Optional: If you need to clear credentials explicitly after use (though they are short-lived with WIF)
+      # - name: 'Logout of Google Cloud'
+      #   if: always()
+      #   run: 'gcloud auth revoke' 

@@ -1,6 +1,43 @@
 steps:
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args: ['echo', 'Hello, Cloud Build! Placeholder for build steps.']
+  # 1. Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/csa-agent-backend:$COMMIT_SHA', '.']
+    id: 'Build Docker Image'
+
+  # 2. Push the Docker image to Google Container Registry (GCR)
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/csa-agent-backend:$COMMIT_SHA']
+    id: 'Push to GCR'
+    waitFor: ['Build Docker Image']
+
+  # 3. Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args: [
+        'run', 'deploy', 'csa-agent-backend-service', # Replace with your Cloud Run service name
+        '--image', 'gcr.io/$PROJECT_ID/csa-agent-backend:$COMMIT_SHA',
+        '--region', 'us-central1', # Replace with your desired region
+        '--platform', 'managed',
+        '--quiet', # Suppresses interactive prompts
+        '--allow-unauthenticated', # Remove if you want to restrict access
+        # Example: Setting an environment variable from a substitution
+        # '--update-env-vars', 'DB_HOST=$_DB_HOST', 
+        # Add other environment variables as needed, e.g., DB_USER, DB_PASSWORD, etc.
+        # Remember to configure these substitutions in your Cloud Build trigger or pass them during manual build submission.
+      ]
+    id: 'Deploy to Cloud Run'
+    waitFor: ['Push to GCR']
+
+# Substitutions (provide these when running the build, or in trigger configuration)
+# Example:
+# _DB_HOST: 'your-db-host-value'
+
+# Define the image to be built (optional, but good practice)
+images:
+  - 'gcr.io/$PROJECT_ID/csa-agent-backend:$COMMIT_SHA'
+
+# Optional: Configure timeout for the build
+# timeout: '1200s'
 
 # Placeholder for future deployment steps, e.g., to Cloud Run
 # images:
