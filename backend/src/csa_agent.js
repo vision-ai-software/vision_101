@@ -1,20 +1,18 @@
 const { StateGraph, END } = require("@langchain/langgraph");
-const { BaseCheckpointSaver } = require("@langchain/langgraph/checkpoint"); // Placeholder, will need a concrete implementation
-const { Tool } = require("langchain/tools"); // Or specific tool imports
+// const { BaseCheckpointSaver } = require("@langchain/langgraph/checkpoint"); // This import path doesn't exist
+const { Tool } = require("langchain/tools");
 const { AIMessage, HumanMessage, SystemMessage } = require("@langchain/core/messages");
 const { PromptTemplate } = require("@langchain/core/prompts");
 const { StringOutputParser } = require("@langchain/core/output_parsers");
 const { RunnableSequence } = require("@langchain/core/runnables");
-const { LanguageServiceClient } = require('@google-cloud/language'); // Added Google NLP client
-const { ChatGoogleGenerativeAI } = require("@langchain/google-webauth"); // For Gemini
-const { getKnowledgeBaseArticle } = require('./database'); // Import KB function
+const { LanguageServiceClient } = require('@google-cloud/language');
+const { ChatGoogleGenerativeAI } = require("@langchain/google-webauth");
+const { getKnowledgeBaseArticle } = require('./database');
+const fetch = require('node-fetch');
 
-// TODO: Choose and implement a suitable CheckpointSaver for JavaScript
-// For example, langgraph/checkpoint/memory.js offers an InMemorySaver
-// Or we might need one for Firestore or your chosen DB if persisting across sessions is critical initially.
-class MemorySaver extends BaseCheckpointSaver {
+// Simple in-memory checkpoint saver implementation
+class MemorySaver {
     constructor() {
-        super();
         this.storage = new Map();
     }
 
@@ -26,8 +24,6 @@ class MemorySaver extends BaseCheckpointSaver {
         this.storage.set(config.configurable.thread_id, checkpoint);
         return Promise.resolve();
     }
-    // TODO: Implement list if needed for your use case
-    // list(config: RunnableConfig): Checkpoint[] | Promise<Checkpoint[]> { throw new Error("Not implemented."); }
 }
 
 class CSAAgent {
@@ -73,16 +69,67 @@ class CSAAgent {
     }
 
     _setupIntegrationTools() {
-        // TODO: Define actual tools (e.g., for Zapier, CRM) as per OAP plan
-        // Example:
-        // const zapierTicketTool = new Tool({
-        //     name: "zapier_create_ticket",
-        //     description: "Create support ticket via Zapier",
-        //     func: async (args) => { /* ... your Zapier call logic ... */ return "Ticket created"; },
-        //     // schema: ZodSchema for args if using StructuredTool equivalent
-        // });
+        // HubSpot Ticket Creation Tool via n8n webhook
+        const hubspotTicketTool = new Tool({
+            name: "create_hubspot_ticket",
+            description: "Create a support ticket in HubSpot via n8n webhook for customer escalations",
+            func: async (args) => {
+                try {
+                    const webhookUrl = "https://aman11.app.n8n.cloud/webhook/bef6ec76-5744-4160-acb3-3f3a38350b64";
+                    
+                    // Prepare request body with basic required fields
+                    const requestBody = {
+                        title: args.title || "Customer Support Request",
+                        description: args.description || "Customer requires assistance",
+                        customer_email: args.customer_email || "unknown@customer.com",
+                        priority: args.priority || "medium",
+                        source: "AI Agent",
+                        conversation_summary: args.conversation_summary || "Escalated from AI chat"
+                    };
+
+                    console.log("[HubSpot Tool] Creating ticket with data:", requestBody);
+
+                    const response = await fetch(webhookUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'User-Agent': 'Vision-AI-CSA-Agent/1.0'
+                        },
+                        body: JSON.stringify(requestBody)
+                    });
+
+                    if (!response.ok) {
+                        const errorBody = await response.text();
+                        console.error(`[HubSpot Tool] Webhook call failed: ${response.status} - ${errorBody}`);
+                        throw new Error(`Failed to create HubSpot ticket: ${response.statusText}`);
+                    }
+
+                    const responseData = await response.json();
+                    console.log("[HubSpot Tool] Ticket created successfully:", responseData);
+                    
+                    return {
+                        success: true,
+                        message: "Support ticket created successfully",
+                        ticket_id: responseData.objectId || responseData.hs_ticket_id?.value || responseData.id || "unknown",
+                        hubspot_ticket_id: responseData.objectId,
+                        details: responseData
+                    };
+
+                } catch (error) {
+                    console.error("[HubSpot Tool] Error creating ticket:", error);
+                    return {
+                        success: false,
+                        message: "Failed to create support ticket",
+                        error: error.message
+                    };
+                }
+            },
+        });
+
         return {
-            // zapier_ticket: zapierTicketTool,
+            hubspot_ticket: hubspotTicketTool,
+            // Add more tools here as needed
+            // zapier_order_status: orderStatusTool,
             // crm_update: crmUpdateTool
         };
     }
@@ -306,16 +353,45 @@ class CSAAgent {
 
     async _actionWorkflow(state) {
         console.log("[CSAAgent Action] Determining action for intent:", state.intent);
-        // TODO: Implement action determination and execution
-        // Call tools like Zapier, CRM update etc.
-        const required_action = "placeholder_action"; // await this._determineAction(state.intent, state.entities);
+        let required_action = null;
         let action_result = "No action performed.";
 
-        // if (required_action === "create_ticket") {
-        //     action_result = await this.tools.zapier_ticket.invoke({ /* ... */ });
-        // } else if (required_action === "update_crm") {
-        //     action_result = await this.tools.crm_update.invoke({ /* ... */ });
-        // }
+        // Determine what action to take based on intent and entities
+        if (state.intent === 'escalate_to_human') {
+            required_action = "create_hubspot_ticket";
+        } else if (state.intent === 'check_order_status' && state.entities && state.entities.length > 0) {
+            // Future: implement order status check
+            required_action = "check_order_status";
+            action_result = "Order status check not yet implemented.";
+        }
+        // Add more action mappings as needed
+
+        // Execute the action
+        if (required_action === "create_hubspot_ticket") {
+            try {
+                // Prepare conversation summary for the ticket
+                const conversationSummary = this._generateConversationSummary(state);
+                
+                const ticketArgs = {
+                    title: `Escalation: ${state.user_input.substring(0, 50)}...`,
+                    description: state.user_input,
+                    customer_email: state.customer_email || "unknown@customer.com", // You might want to extract this from entities or state
+                    priority: state.sentiment && state.sentiment.label === 'negative' ? 'high' : 'medium',
+                    conversation_summary: conversationSummary
+                };
+
+                action_result = await this.tools.hubspot_ticket.invoke(ticketArgs);
+                console.log("[CSAAgent Action] HubSpot ticket result:", action_result);
+
+            } catch (error) {
+                console.error("[CSAAgent Action] Error creating HubSpot ticket:", error);
+                action_result = {
+                    success: false,
+                    message: "Failed to create support ticket due to technical error",
+                    error: error.message
+                };
+            }
+        }
 
         return {
             ...state,
@@ -324,38 +400,65 @@ class CSAAgent {
         };
     }
 
+    // Helper method to generate conversation summary for tickets
+    _generateConversationSummary(state) {
+        const history = state.conversation_history || [];
+        if (history.length === 0) {
+            return `User query: ${state.user_input}\nIntent: ${state.intent}\nSentiment: ${state.sentiment?.label || 'neutral'}`;
+        }
+
+        const formattedHistory = history.slice(-4).map(msg => { // Last 4 messages
+            if (msg instanceof HumanMessage) return `User: ${msg.content}`;
+            if (msg instanceof AIMessage) return `Agent: ${msg.content}`;
+            return msg.content;
+        }).join('\n');
+
+        return `Recent conversation:\n${formattedHistory}\n\nCurrent query: ${state.user_input}\nIntent: ${state.intent}\nSentiment: ${state.sentiment?.label || 'neutral'}`;
+    }
+
     async _escalationWorkflow(state) {
         console.log("[CSAAgent Escalation] Escalating conversation.");
-        // TODO: Implement escalation logic
-        // This might involve summarizing the conversation and calling a handoff service
-        const summary = "Conversation requires escalation.";
-        // await adk.callIntegrationService('trigger_human_handoff', { conversationId: state.thread_id, summary, history: state.conversation_history });
-        const aiResponse = new AIMessage("I am escalating this to a human agent.");
+        
+        // First, create the ticket via action workflow
+        const actionState = await this._actionWorkflow(state);
+        
+        // Prepare escalation response based on ticket creation result
+        let escalationMessage = "I am escalating this to a human agent.";
+        
+        if (actionState.action_result && actionState.action_result.success) {
+            escalationMessage = `I've created a support ticket for you and escalated this to our human support team. Your ticket reference is: ${actionState.action_result.ticket_id || 'pending'}. A human agent will follow up with you soon.`;
+        } else {
+            escalationMessage = "I'm escalating this to a human agent. There may be a brief delay in ticket creation, but someone will follow up with you soon.";
+        }
+        
+        const aiResponse = new AIMessage(escalationMessage);
         return {
-            ...state,
-            conversation_history: [aiResponse],
-            final_response: "I am escalating this to a human agent.",
+            ...actionState, // Include the action results
+            conversation_history: state.conversation_history ? state.conversation_history.concat([aiResponse]) : [aiResponse],
+            final_response: escalationMessage,
         };
     }
 
-    // --- Routing Logic --- 
+    // Update routing to ensure escalate_to_human goes to the action workflow first
     async _routeAfterNlu(state) {
         console.log("[CSAAgent Router] NLU routing. Intent:", state.intent, "Confidence:", state.nlu_confidence, "Sentiment:", state.sentiment.label);
-        // TODO: Refine routing logic based on actual NLU output, confidence, and sentiment
+        
         if (state.intent === 'nlu_error') {
-            return "escalate"; // Or a specific error handling node
+            return "escalate";
         }
-        if (state.intent === 'ask_question' || state.nlu_confidence < 0.6) { // Adjusted confidence threshold
+        if (state.intent === 'escalate_to_human') {
+            return "escalate"; // This will now handle ticket creation
+        }
+        if (state.intent === 'ask_question' || state.nlu_confidence < 0.6) {
             return "need_info";
-        } else if (state.intent === 'check_order_status') { // Example specific intent for action
+        } else if (state.intent === 'check_order_status') {
             return "need_action";
-        } else if (state.intent === 'escalate_to_human') {
-            return "need_human";
         } else {
-            return "continue_chat"; // Default to general conversation flow
+            return "continue_chat";
         }
     }
 
+    // --- Routing Logic --- 
     async _routeAfterKnowledge(state) {
         console.log("[CSAAgent Router] Knowledge routing. Confidence:", state.knowledge_confidence);
         // TODO: Implement routing logic based on knowledge retrieval output
