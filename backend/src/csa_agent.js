@@ -9,19 +9,69 @@ const { LanguageServiceClient } = require('@google-cloud/language');
 const { ChatGoogleGenerativeAI } = require("@langchain/google-webauth");
 const { getKnowledgeBaseArticle } = require('./database');
 const fetch = require('node-fetch');
+const { Firestore } = require('@google-cloud/firestore'); // Added Firestore import
 
-// Simple in-memory checkpoint saver implementation
-class MemorySaver {
-    constructor() {
-        this.storage = new Map();
+// Simple in-memory checkpoint saver implementation - Will be replaced
+// class MemorySaver {
+//     constructor() {
+//         this.storage = new Map();
+//     }
+//
+//     get(config) {
+//         return this.storage.get(config.configurable.thread_id) || null;
+//     }
+//
+//     put(config, checkpoint) {
+//         this.storage.set(config.configurable.thread_id, checkpoint);
+//         return Promise.resolve();
+//     }
+// }
+
+// Firestore-based checkpoint saver
+class FirestoreCheckpointSaver {
+    constructor(config) {
+        if (!config || !config.collectionName) {
+            throw new Error("FirestoreCheckpointSaver requires a 'collectionName' in config.");
+        }
+        this.firestore = new Firestore();
+        this.collection = this.firestore.collection(config.collectionName);
+        console.log(`[FirestoreCheckpointSaver] Initialized with collection: ${config.collectionName}`);
     }
 
-    get(config) {
-        return this.storage.get(config.configurable.thread_id) || null;
+    async get(config) {
+        if (!config || !config.configurable || !config.configurable.thread_id) {
+            console.warn("[FirestoreCheckpointSaver] Attempted to get checkpoint without thread_id in config.");
+            return null;
+        }
+        const threadId = config.configurable.thread_id;
+        console.log(`[FirestoreCheckpointSaver] Getting checkpoint for thread_id: ${threadId}`);
+        const docRef = this.collection.doc(threadId);
+        const doc = await docRef.get();
+        if (!doc.exists) {
+            console.log(`[FirestoreCheckpointSaver] No checkpoint found for thread_id: ${threadId}`);
+            return null;
+        }
+        console.log(`[FirestoreCheckpointSaver] Checkpoint retrieved for thread_id: ${threadId}`);
+        // Firestore stores data, LangGraph expects specific checkpoint structure including 'ts' (timestamp)
+        // Ensure the stored data is compatible or adapt as needed.
+        // For now, assuming the stored data is the checkpoint object.
+        return doc.data(); 
     }
 
-    put(config, checkpoint) {
-        this.storage.set(config.configurable.thread_id, checkpoint);
+    async put(config, checkpoint) {
+        if (!config || !config.configurable || !config.configurable.thread_id) {
+            console.error("[FirestoreCheckpointSaver] Attempted to put checkpoint without thread_id in config.");
+            return Promise.reject(new Error("Missing thread_id in config for put operation."));
+        }
+        const threadId = config.configurable.thread_id;
+        console.log(`[FirestoreCheckpointSaver] Putting checkpoint for thread_id: ${threadId}`);
+        // The 'checkpoint' object can be large and complex.
+        // Firestore has document size limits (around 1MB). Consider this for very long conversations.
+        // Also, ensure all parts of the checkpoint are serializable for Firestore.
+        // For example, custom class instances might need special handling if not plain objects.
+        // The checkpoint includes a 'ts' (ISO timestamp string), which is fine for Firestore.
+        await this.collection.doc(threadId).set(checkpoint);
+        console.log(`[FirestoreCheckpointSaver] Checkpoint saved for thread_id: ${threadId}`);
         return Promise.resolve();
     }
 }
@@ -29,7 +79,8 @@ class MemorySaver {
 class CSAAgent {
     constructor() {
         // Single agent with multiple internal workflows
-        this.memory = new MemorySaver(); // Using InMemorySaver as a placeholder
+        // this.memory = new MemorySaver(); // Using InMemorySaver as a placeholder
+        this.memory = new FirestoreCheckpointSaver({ collectionName: 'csa_agent_checkpoints_v1' }); // Using Firestore
         this.tools = this._setupIntegrationTools();
         
         // Initialize any LLMs or clients needed by the workflows here

@@ -1,3 +1,4 @@
+require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
 // Test HubSpot webhook with real environment credentials
 const fetch = require('node-fetch');
 
