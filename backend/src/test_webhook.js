@@ -22,7 +22,7 @@ async function testWebhookWithEnvCredentials() {
     }
     
     try {
-        const webhookUrl = "https://aman11.app.n8n.cloud/webhook/bef6ec76-5744-4160-acb3-3f3a38350b64";
+        const webhookUrl = "http://localhost:5678/webhook/bef6ec76-5744-4160-acb3-3f3a38350b64";
         
         // Test data for ticket creation
         const testTicketData = {
@@ -55,21 +55,29 @@ async function testWebhookWithEnvCredentials() {
         console.log("Response status text:", response.statusText);
         console.log();
         
+        const responseText = await response.text(); // Get response as text first
+        console.log("Raw response text from webhook:", responseText); // Log raw text
+
         if (response.ok) {
-            const responseData = await response.json();
-            console.log("✅ Webhook call successful!");
-            console.log("Response data:", JSON.stringify(responseData, null, 2));
+            try {
+                const responseData = JSON.parse(responseText); // Try to parse the logged text
+                console.log("✅ Webhook call successful!");
+                console.log("Response data:", JSON.stringify(responseData, null, 2));
             
-            // Extract ticket information if available
-            if (responseData.ticket_id || responseData.id) {
-                console.log("\n🎟️ Ticket created successfully!");
-                console.log("Ticket ID:", responseData.ticket_id || responseData.id);
+                // Extract ticket information if available
+                if (responseData.ticket_id || responseData.id) {
+                    console.log("\n🎟️ Ticket created successfully!");
+                    console.log("Ticket ID:", responseData.ticket_id || responseData.id);
+                }
+            } catch (jsonError) {
+                console.error("❌ Failed to parse webhook response as JSON:", jsonError.message);
+                console.log("💡 The webhook returned a 2xx status but the body was not valid JSON.");
             }
             
         } else {
-            const errorText = await response.text();
+            // const errorText = await response.text(); // Already got responseText
             console.log("❌ Webhook call failed");
-            console.log("Error response:", errorText);
+            console.log("Error response (from raw text):", responseText);
             
             if (response.status === 403) {
                 console.log("\n💡 Troubleshooting tips:");

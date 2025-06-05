@@ -1,4 +1,15 @@
+/**
+ * Vision AI Customer Support Automation Agent
+ * 
+ * SECURITY NOTE: This file handles sensitive credentials.
+ * - Service account private keys should NEVER be logged
+ * - Always use environment variables or secure credential storage
+ * - Regularly rotate service account keys
+ * - Monitor for credential exposure in logs
+ */
+
 const { StateGraph, END } = require("@langchain/langgraph");
+const { CheckpointTuple } = require("@langchain/langgraph-checkpoint");
 // const { BaseCheckpointSaver } = require("@langchain/langgraph/checkpoint"); // This import path doesn't exist
 const { Tool } = require("langchain/tools");
 const { AIMessage, HumanMessage, SystemMessage } = require("@langchain/core/messages");
@@ -6,97 +17,239 @@ const { PromptTemplate } = require("@langchain/core/prompts");
 const { StringOutputParser } = require("@langchain/core/output_parsers");
 const { RunnableSequence } = require("@langchain/core/runnables");
 const { LanguageServiceClient } = require('@google-cloud/language');
-const { ChatGoogleGenerativeAI } = require("@langchain/google-webauth");
+const { ChatVertexAI } = require("@langchain/google-vertexai");
 const { getKnowledgeBaseArticle } = require('./database');
 const fetch = require('node-fetch');
 const { Firestore } = require('@google-cloud/firestore'); // Added Firestore import
+const fs = require('fs');
+const path = require('path');
 
-// Simple in-memory checkpoint saver implementation - Will be replaced
-// class MemorySaver {
-//     constructor() {
-//         this.storage = new Map();
-//     }
-//
-//     get(config) {
-//         return this.storage.get(config.configurable.thread_id) || null;
-//     }
-//
-//     put(config, checkpoint) {
-//         this.storage.set(config.configurable.thread_id, checkpoint);
-//         return Promise.resolve();
-//     }
-// }
-
-// Firestore-based checkpoint saver
-class FirestoreCheckpointSaver {
-    constructor(config) {
-        if (!config || !config.collectionName) {
-            throw new Error("FirestoreCheckpointSaver requires a 'collectionName' in config.");
-        }
-        this.firestore = new Firestore();
-        this.collection = this.firestore.collection(config.collectionName);
-        console.log(`[FirestoreCheckpointSaver] Initialized with collection: ${config.collectionName}`);
+// Simple in-memory checkpoint saver implementation - Fallback when Firestore fails
+class MemorySaver {
+    constructor() {
+        this.storage = new Map();
+        console.log("[MemorySaver] Initialized in-memory checkpoint storage");
     }
 
     async get(config) {
-        if (!config || !config.configurable || !config.configurable.thread_id) {
-            console.warn("[FirestoreCheckpointSaver] Attempted to get checkpoint without thread_id in config.");
-            return null;
-        }
-        const threadId = config.configurable.thread_id;
-        console.log(`[FirestoreCheckpointSaver] Getting checkpoint for thread_id: ${threadId}`);
-        const docRef = this.collection.doc(threadId);
-        const doc = await docRef.get();
-        if (!doc.exists) {
-            console.log(`[FirestoreCheckpointSaver] No checkpoint found for thread_id: ${threadId}`);
-            return null;
-        }
-        console.log(`[FirestoreCheckpointSaver] Checkpoint retrieved for thread_id: ${threadId}`);
-        // Firestore stores data, LangGraph expects specific checkpoint structure including 'ts' (timestamp)
-        // Ensure the stored data is compatible or adapt as needed.
-        // For now, assuming the stored data is the checkpoint object.
-        return doc.data(); 
+        const threadId = config?.configurable?.thread_id;
+        if (!threadId) return null;
+        
+        const checkpoint = this.storage.get(threadId) || null;
+        console.log(`[MemorySaver] Getting checkpoint for thread ${threadId}:`, checkpoint ? 'found' : 'not found');
+        return checkpoint;
+    }
+
+    async getTuple(config) {
+        const checkpoint = await this.get(config);
+        if (!checkpoint) return undefined;
+        
+        return {
+            checkpoint: checkpoint,
+            config: config,
+            parentConfig: null
+        };
     }
 
     async put(config, checkpoint) {
-        if (!config || !config.configurable || !config.configurable.thread_id) {
-            console.error("[FirestoreCheckpointSaver] Attempted to put checkpoint without thread_id in config.");
-            return Promise.reject(new Error("Missing thread_id in config for put operation."));
-        }
-        const threadId = config.configurable.thread_id;
-        console.log(`[FirestoreCheckpointSaver] Putting checkpoint for thread_id: ${threadId}`);
-        // The 'checkpoint' object can be large and complex.
-        // Firestore has document size limits (around 1MB). Consider this for very long conversations.
-        // Also, ensure all parts of the checkpoint are serializable for Firestore.
-        // For example, custom class instances might need special handling if not plain objects.
-        // The checkpoint includes a 'ts' (ISO timestamp string), which is fine for Firestore.
-        await this.collection.doc(threadId).set(checkpoint);
-        console.log(`[FirestoreCheckpointSaver] Checkpoint saved for thread_id: ${threadId}`);
+        const threadId = config?.configurable?.thread_id;
+        if (!threadId) return;
+        
+        this.storage.set(threadId, checkpoint);
+        console.log(`[MemorySaver] Saved checkpoint for thread ${threadId}`);
         return Promise.resolve();
+    }
+}
+
+// Firestore-based checkpoint saver with error handling
+class FirestoreCheckpointSaver {
+    constructor(config, authOptions) {
+        if (!config || !config.collectionName) {
+            throw new Error("FirestoreCheckpointSaver requires a 'collectionName' in config.");
+        }
+        
+        this.fallbackSaver = new MemorySaver();
+        this.firestoreHealthy = true;
+        
+        try {
+            if (authOptions && authOptions.projectId && 
+                authOptions.credentials && authOptions.credentials.client_email && authOptions.credentials.private_key) {
+                console.log(`[FirestoreCheckpointSaver] Attempting to initialize Firestore with provided credentials for project: ${authOptions.projectId}`);
+                this.firestore = new Firestore({
+                    projectId: authOptions.projectId,
+                    credentials: authOptions.credentials
+                });
+                console.log(`[FirestoreCheckpointSaver] Successfully initialized Firestore with provided credentials. Collection: ${config.collectionName}`);
+            } else {
+                console.warn(`[FirestoreCheckpointSaver] WARNING: Provided authOptions not complete or missing. Falling back to Application Default Credentials.`);
+                this.firestore = new Firestore();
+            }
+            this.collection = this.firestore.collection(config.collectionName);
+        } catch (error) {
+            console.error(`[FirestoreCheckpointSaver] Failed to initialize Firestore:`, error);
+            console.log(`[FirestoreCheckpointSaver] Using in-memory fallback storage`);
+            this.firestoreHealthy = false;
+        }
+    }
+
+    async get(config) {
+        if (!this.firestoreHealthy) {
+            return this.fallbackSaver.get(config);
+        }
+
+        try {
+            if (!config || !config.configurable || !config.configurable.thread_id) {
+                console.warn("[FirestoreCheckpointSaver] Attempted to get checkpoint without thread_id in config.");
+                return null;
+            }
+            const threadId = config.configurable.thread_id;
+            console.log(`[FirestoreCheckpointSaver] Getting checkpoint for thread_id: ${threadId}`);
+            
+            const docRef = this.collection.doc(threadId);
+            const doc = await docRef.get();
+            
+            if (!doc.exists) {
+                console.log(`[FirestoreCheckpointSaver] No checkpoint found for thread_id: ${threadId}`);
+                return null;
+            }
+            
+            console.log(`[FirestoreCheckpointSaver] Checkpoint retrieved for thread_id: ${threadId}`);
+            return doc.data();
+        } catch (error) {
+            console.error(`[FirestoreCheckpointSaver] Error getting checkpoint, falling back to memory:`, error.message);
+            this.firestoreHealthy = false;
+            return this.fallbackSaver.get(config);
+        }
+    }
+
+    async getTuple(config) {
+        if (!this.firestoreHealthy) {
+            return this.fallbackSaver.getTuple(config);
+        }
+
+        try {
+            if (!config || !config.configurable || !config.configurable.thread_id) {
+                console.warn("[FirestoreCheckpointSaver] Attempted to getTuple without thread_id in config.");
+                return undefined;
+            }
+            
+            const threadId = config.configurable.thread_id;
+            console.log(`[FirestoreCheckpointSaver] Getting tuple for thread_id: ${threadId}`);
+
+            const docRef = this.collection.doc(threadId);
+            const doc = await docRef.get();
+
+            if (!doc.exists) {
+                console.log(`[FirestoreCheckpointSaver] No checkpoint tuple found for thread_id: ${threadId}`);
+                return undefined;
+            }
+            
+            const checkpoint = doc.data();
+            console.log(`[FirestoreCheckpointSaver] Checkpoint tuple retrieved for thread_id: ${threadId}`);
+            
+            return {
+                checkpoint: checkpoint,
+                config: config,
+                parentConfig: null
+            };
+        } catch (error) {
+            console.error(`[FirestoreCheckpointSaver] Error getting tuple, falling back to memory:`, error.message);
+            this.firestoreHealthy = false;
+            return this.fallbackSaver.getTuple(config);
+        }
+    }
+
+    async put(config, checkpoint) {
+        if (!this.firestoreHealthy) {
+            return this.fallbackSaver.put(config, checkpoint);
+        }
+
+        try {
+            if (!config || !config.configurable || !config.configurable.thread_id) {
+                console.error("[FirestoreCheckpointSaver] Attempted to put checkpoint without thread_id in config.");
+                return this.fallbackSaver.put(config, checkpoint);
+            }
+            
+            const threadId = config.configurable.thread_id;
+            console.log(`[FirestoreCheckpointSaver] Putting checkpoint for thread_id: ${threadId}`);
+            
+            await this.collection.doc(threadId).set(checkpoint);
+            console.log(`[FirestoreCheckpointSaver] Checkpoint saved for thread_id: ${threadId}`);
+            return Promise.resolve();
+        } catch (error) {
+            console.error(`[FirestoreCheckpointSaver] Error saving checkpoint, falling back to memory:`, error.message);
+            this.firestoreHealthy = false;
+            return this.fallbackSaver.put(config, checkpoint);
+        }
     }
 }
 
 class CSAAgent {
     constructor() {
-        // Single agent with multiple internal workflows
-        // this.memory = new MemorySaver(); // Using InMemorySaver as a placeholder
-        this.memory = new FirestoreCheckpointSaver({ collectionName: 'csa_agent_checkpoints_v1' }); // Using Firestore
+        // Initialize any LLMs or clients needed by the workflows here
+        
+        // --- Load Service Account Credentials for Google Cloud Services ---
+        let googleAuthOptions = {};
+        const serviceAccountPath = path.join(__dirname, '..', '..', 'service-account', 'vision-101-460206-62ac37f1a9dc.json');
+        try {
+            if (fs.existsSync(serviceAccountPath)) {
+                const credentialsJson = fs.readFileSync(serviceAccountPath, 'utf8');
+                const credentials = JSON.parse(credentialsJson);
+                googleAuthOptions = {
+                    credentials: {
+                        client_email: credentials.client_email,
+                        private_key: credentials.private_key,
+                    },
+                    projectId: credentials.project_id,
+                };
+                console.log("[CSAAgent Constructor] Successfully loaded service account credentials from file.");
+            } else {
+                console.warn(`[CSAAgent Constructor] Service account key file not found at ${serviceAccountPath}. GOOGLE_APPLICATION_CREDENTIALS env var will be used if set.`);
+            }
+        } catch (error) {
+            console.error("[CSAAgent Constructor] Error loading service account credentials:", error);
+            console.warn("[CSAAgent Constructor] Proceeding without directly loaded credentials. GOOGLE_APPLICATION_CREDENTIALS will be used if set.");
+        }
+        // --- End Load Service Account Credentials ---
+
+        // Safe logging without exposing sensitive credentials
+        console.log("[CSAAgent Constructor] googleAuthOptions before FirestoreCheckpointSaver:", {
+            projectId: googleAuthOptions.projectId,
+            hasCredentials: !!(googleAuthOptions.credentials && googleAuthOptions.credentials.client_email),
+            client_email: googleAuthOptions.credentials?.client_email,
+            private_key: googleAuthOptions.credentials?.private_key ? "[REDACTED - PRIVATE KEY PRESENT]" : "[NOT PROVIDED]"
+        });
+
+        // Initialize memory and tools (single initialization)
+        this.memory = new FirestoreCheckpointSaver({ collectionName: 'csa_agent_checkpoints_v1' }, googleAuthOptions);
         this.tools = this._setupIntegrationTools();
         
-        // Initialize any LLMs or clients needed by the workflows here
-        this.languageClient = new LanguageServiceClient(); // Initialize Google NLP Client
-        // e.g., this.llm = new ChatOpenAI(...); // We'll use Google models like Gemini instead
-        // Example: this.geminiModel = new VertexAI({ model: "gemini-pro", ... }); // Or ChatGoogleGenerativeAI
-        // e.g., this.knowledgeBase = new YourKnowledgeBaseClient(...);
+        this.languageClient = new LanguageServiceClient(googleAuthOptions.projectId ? { projectId: googleAuthOptions.projectId, credentials: googleAuthOptions.credentials } : {}); 
 
-        // Initialize Google Generative AI model (Gemini)
-        // Ensure your environment is authenticated (e.g., GOOGLE_APPLICATION_CREDENTIALS)
-        this.chatModel = new ChatGoogleGenerativeAI({
-            modelName: "gemini-pro", // Or your preferred Gemini model
+        // Initialize Google Vertex AI model (Gemini)
+        this.chatModel = new ChatVertexAI({
+            modelName: "gemini-pro", 
             temperature: 0.7,
-            // convertSystemMessageToHuman: true, // Might be needed depending on model version and desired behavior with system messages
+            locationId: "us-central1", 
+            authOptions: googleAuthOptions, // Pass loaded credentials
         });
         
+        // Define a prompt template for context generation from KB articles
+        this.contextGenerationPrompt = new PromptTemplate({
+            template: `Given the following knowledge base article content:
+            ---------------------
+            {article_content}
+            ---------------------
+            And the user's query: "{user_query}"
+
+            Extract the most relevant information from the article that directly addresses the user's query.
+            If the article does not contain relevant information for the query, state that clearly.
+            Present the information concisely.
+            Relevant Information:
+            `,
+            inputVariables: ["article_content", "user_query"],
+        });
+
         // Define a simple prompt template for the dialog workflow
         this.dialogPrompt = new PromptTemplate({
             template: `You are Vision AI's helpful and friendly customer support agent.
@@ -126,7 +279,20 @@ class CSAAgent {
             description: "Create a support ticket in HubSpot via n8n webhook for customer escalations",
             func: async (args) => {
                 try {
-                    const webhookUrl = "https://aman11.app.n8n.cloud/webhook/bef6ec76-5744-4160-acb3-3f3a38350b64";
+                    const webhookUrl = "http://localhost:5678/webhook/bef6ec76-5744-4160-acb3-3f3a38350b64";
+                    const username = process.env.N8N_WEBHOOK_USER;
+                    const password = process.env.N8N_WEBHOOK_PASSWORD;
+
+                    if (!username || !password) {
+                        console.error("[HubSpot Tool] Missing N8N_WEBHOOK_USER or N8N_WEBHOOK_PASSWORD environment variables.");
+                        return {
+                            success: false,
+                            message: "Authentication credentials for webhook are not configured in the environment.",
+                            error: "Missing environment variables for webhook authentication."
+                        };
+                    }
+                    
+                    const basicAuth = Buffer.from(`${username}:${password}`).toString('base64');
                     
                     // Prepare request body with basic required fields
                     const requestBody = {
@@ -144,7 +310,8 @@ class CSAAgent {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'User-Agent': 'Vision-AI-CSA-Agent/1.0'
+                            'User-Agent': 'Vision-AI-CSA-Agent/1.0',
+                            'Authorization': `Basic ${basicAuth}`
                         },
                         body: JSON.stringify(requestBody)
                     });
@@ -190,20 +357,58 @@ class CSAAgent {
         const workflow = new StateGraph({
             channels: {
                 // Define the shape of your state object here
-                // Based on your Python example, it might look like:
-                user_input: { value: null },
-                intent: { value: null },
-                entities: { value: null },
-                sentiment: { value: null },
-                language: { value: null },
-                nlu_confidence: { value: null },
-                retrieved_docs: { value: null },
-                context: { value: null },
-                knowledge_confidence: { value: null },
-                action_taken: { value: null },
-                action_result: { value: null },
-                conversation_history: { value: (x, y) => x.concat(y), default: () => [] }, // Example for accumulating history
-                // Add other state fields as needed
+                user_input: {
+                    value: (x, y) => y ?? x,
+                    default: () => null
+                },
+                intent: {
+                    value: (x, y) => y ?? x,
+                    default: () => null
+                },
+                entities: {
+                    value: (x, y) => y ?? x,
+                    default: () => []
+                },
+                sentiment: {
+                    value: (x, y) => y ?? x,
+                    default: () => ({ score: 0, magnitude: 0, label: "neutral" })
+                },
+                language: {
+                    value: (x, y) => y ?? x,
+                    default: () => "en"
+                },
+                nlu_confidence: {
+                    value: (x, y) => y ?? x,
+                    default: () => 0
+                },
+                retrieved_docs: {
+                    value: (x, y) => y ?? x,
+                    default: () => []
+                },
+                context: {
+                    value: (x, y) => y ?? x,
+                    default: () => null
+                },
+                knowledge_confidence: {
+                    value: (x, y) => y ?? x,
+                    default: () => 0
+                },
+                action_taken: {
+                    value: (x, y) => y ?? x,
+                    default: () => null
+                },
+                action_result: {
+                    value: (x, y) => y ?? x,
+                    default: () => null
+                },
+                conversation_history: {
+                    value: (x, y) => x.concat(y),
+                    default: () => []
+                },
+                final_response: {
+                    value: (x, y) => y ?? x,
+                    default: () => null
+                }
             }
         });
 
@@ -319,32 +524,60 @@ class CSAAgent {
         let knowledge_confidence = 0.0;
 
         try {
-            // 1. Retrieve document (Basic RAG step)
-            const queryForKB = state.intent === 'ask_question' || state.intent === 'unknown_intent' ? state.user_input : state.intent; // Use intent or full query
+            const queryForKB = state.intent === 'ask_question' || state.intent === 'unknown_intent' ? state.user_input : state.intent;
             retrieved_article = await getKnowledgeBaseArticle(queryForKB);
 
             if (retrieved_article && retrieved_article.source !== 'database_error') {
-                // For now, context is the direct content. Re-ranking and advanced context generation are future RAG steps.
-                context = retrieved_article.content || "Found an article, but it has no content.";
-                // Simple confidence: base on relevance score if available, or presence of article
-                knowledge_confidence = retrieved_article.relevance ? Math.min(retrieved_article.relevance / 10, 1.0) : 0.7; // Normalize relevance, capped at 1.0
-                console.log(`[CSAAgent KB] Found article: ${retrieved_article.title}, Relevance: ${retrieved_article.relevance}, Confidence: ${knowledge_confidence}`);
+                if (retrieved_article.content && retrieved_article.content.trim() !== "") {
+                    console.log(`[CSAAgent KB] Found article: ${retrieved_article.title}, Relevance: ${retrieved_article.relevance}. Attempting to generate context with LLM.`);
+                    
+                    try {
+                        const contextChain = RunnableSequence.from([
+                            this.contextGenerationPrompt,
+                            this.chatModel,
+                            new StringOutputParser(),
+                        ]);
+
+                        const generatedContext = await contextChain.invoke({
+                            article_content: retrieved_article.content,
+                            user_query: state.user_input 
+                        });
+                        
+                        if (generatedContext && !generatedContext.toLowerCase().includes("does not contain relevant information")) {
+                            context = generatedContext;
+                            knowledge_confidence = 0.85; // Higher confidence for LLM-processed context
+                            console.log("[CSAAgent KB] Successfully generated context with LLM:", context);
+                        } else {
+                            context = "I found an article, but it doesn't seem to directly answer your question. " + (generatedContext || "");
+                            knowledge_confidence = 0.4; // Lower confidence if LLM determines not relevant or empty
+                            console.log("[CSAAgent KB] LLM indicated article content not relevant or returned empty.");
+                        }
+
+                    } catch (llmError) {
+                        console.error("[CSAAgent KB] Error during LLM context generation:", llmError);
+                        context = "I found an article, but had trouble processing its content for your query. Using raw content.";
+                        // Fallback to using raw content if LLM fails, but with adjusted confidence
+                        context = retrieved_article.content; 
+                        knowledge_confidence = 0.5; // Confidence that we have raw content, but processing failed
+                    }
+                } else {
+                    context = `Found an article titled "${retrieved_article.title}", but it has no content.`;
+                    knowledge_confidence = 0.1; // Low confidence as article is empty
+                    console.log(`[CSAAgent KB] Found article: ${retrieved_article.title}, but it has no content.`);
+                }
             } else if (retrieved_article && retrieved_article.source === 'database_error') {
                 console.error("[CSAAgent KB] Error fetching article from database.");
                 context = "There was an issue accessing the knowledge base.";
-                knowledge_confidence = 0.1; // Low confidence due to DB error
+                knowledge_confidence = 0.1;
             } else {
                 console.log("[CSAAgent KB] No article found for query.");
                 // context remains "No relevant information..."
-                knowledge_confidence = 0.2; // Low confidence as nothing was found
+                knowledge_confidence = 0.2;
             }
 
             // TODO: Implement RAG - Re-rank (if multiple docs were retrieved)
             // const reranked_docs = await this._rerankByRelevance(docs, state.intent);
-
-            // TODO: Implement RAG - Generate/Refine Context (e.g., using Gemini to summarize or extract from retrieved_article.content)
-            // context = await this._buildContextFromDocs(reranked_docs, state.user_input); 
-            // knowledge_confidence = await this._assessKnowledgeQuality(context, state.user_input);
+            // Note: The current getKnowledgeBaseArticle seems to return one article. Re-ranking would apply if it returned multiple candidates.
 
         } catch (error) {
             console.error("[CSAAgent KB] Error during knowledge processing:", error);
@@ -549,7 +782,8 @@ class CSAAgent {
             knowledge_confidence: 0,
             action_taken: null,
             action_result: null,
-            conversation_history: [] // Start with empty history for this invocation
+            conversation_history: [], // Start with empty history for this invocation
+            final_response: null
         };
         const config = { configurable: { thread_id: threadId || "default_thread-" + Date.now() } }; // Manage conversation threads
 

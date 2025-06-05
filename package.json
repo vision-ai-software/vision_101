@@ -25,6 +25,7 @@
     "@google-cloud/language": "^7.0.2",
     "@google/generative-ai": "^0.24.1",
     "@langchain/core": "^0.3.56",
+    "@langchain/google-gauth": "^0.2.10",
     "@langchain/google-vertexai": "^0.2.9",
     "@langchain/langgraph": "^0.2.73",
     "@langchain/openai": "^0.2.5",

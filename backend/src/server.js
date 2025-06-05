@@ -1,8 +1,22 @@
+// Load environment variables first
+require('dotenv').config();
+
 const express = require('express');
 const { CSAAgent } = require('./csa_agent'); // Assuming csa_agent.js is in the same directory
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Enable CORS for frontend communication
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    next();
+});
 
 app.use(express.json());
 
@@ -32,6 +46,26 @@ app.get('/', (req, res) => {
     res.send('CSA Agent API is running!');
 });
 
+// Add a GET endpoint for /api/chat to provide usage information
+app.get('/api/chat', (req, res) => {
+    res.json({
+        message: "CSA Agent Chat API",
+        usage: "This endpoint accepts POST requests only",
+        example: {
+            method: "POST",
+            url: "/api/chat",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: {
+                message: "Hello, I need help",
+                thread_id: "your-thread-id"
+            }
+        },
+        frontend_url: "Open frontend/index.html in your browser to use the chat interface"
+    });
+});
+
 app.post('/api/chat', ensureAgentInitialized, async (req, res) => {
     const { message, thread_id } = req.body;
 
@@ -46,24 +80,12 @@ app.post('/api/chat', ensureAgentInitialized, async (req, res) => {
 
     try {
         const agentResponse = await agent.processMessage(message, thread_id);
-        // The response from processMessage is the full state. 
-        // You might want to extract specific parts, e.g., the latest AI message.
-        // For now, returning the last message from conversation_history if it's an AIMessage.
-        let lastMessageContent = "No response generated.";
-        if (agentResponse && agentResponse.conversation_history && agentResponse.conversation_history.length > 0) {
-            const lastMsg = agentResponse.conversation_history[agentResponse.conversation_history.length - 1];
-            if (lastMsg && lastMsg.constructor.name === 'AIMessage') { // Check if it's an AIMessage
-                 lastMessageContent = lastMsg.content;
-            } else if (lastMsg) {
-                lastMessageContent = "Agent processed input, but last message was not from AI."
-            }
-        }
-        
-        console.log(`[Server] Sending response for thread ${thread_id}:`, lastMessageContent);
+        // The response from processMessage is already a string (final_response)
+        console.log(`[Server] Sending response for thread ${thread_id}:`, agentResponse);
         res.json({ 
-            reply: lastMessageContent, 
+            reply: agentResponse, 
             thread_id: thread_id,
-            full_state: agentResponse // Optionally return the full state for debugging
+            timestamp: new Date().toISOString()
         });
 
     } catch (error) {
