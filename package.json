@@ -29,7 +29,7 @@
     "@langchain/google-vertexai": "^0.2.9",
     "@langchain/langgraph": "^0.2.73",
     "@langchain/openai": "^0.2.5",
-    "@langchain/community": "^0.2.20",
+    "@langchain/community": "^0.3.3",
     "express": "^5.1.0",
     "langchain": "^0.3.26",
     "langsmith": "^0.3.29",
