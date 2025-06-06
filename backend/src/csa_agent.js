@@ -72,15 +72,15 @@ class FirestoreCheckpointSaver {
         this.firestoreHealthy = true;
         
         try {
-            if (authOptions && authOptions.projectId && 
-                authOptions.credentials && authOptions.credentials.client_email && authOptions.credentials.private_key) {
-                console.log(`[FirestoreCheckpointSaver] Attempting to initialize Firestore with provided credentials for project: ${authOptions.projectId}`);
-                this.firestore = new Firestore({
-                    projectId: authOptions.projectId,
-                    credentials: authOptions.credentials
-                });
-                console.log(`[FirestoreCheckpointSaver] Successfully initialized Firestore with provided credentials. Collection: ${config.collectionName}`);
-            } else {
+        if (authOptions && authOptions.projectId && 
+            authOptions.credentials && authOptions.credentials.client_email && authOptions.credentials.private_key) {
+            console.log(`[FirestoreCheckpointSaver] Attempting to initialize Firestore with provided credentials for project: ${authOptions.projectId}`);
+            this.firestore = new Firestore({
+                projectId: authOptions.projectId,
+                credentials: authOptions.credentials
+            });
+            console.log(`[FirestoreCheckpointSaver] Successfully initialized Firestore with provided credentials. Collection: ${config.collectionName}`);
+        } else {
                 console.warn(`[FirestoreCheckpointSaver] WARNING: Provided authOptions not complete or missing. Falling back to Application Default Credentials.`);
                 this.firestore = new Firestore();
             }
@@ -98,23 +98,23 @@ class FirestoreCheckpointSaver {
         }
 
         try {
-            if (!config || !config.configurable || !config.configurable.thread_id) {
-                console.warn("[FirestoreCheckpointSaver] Attempted to get checkpoint without thread_id in config.");
-                return null;
-            }
-            const threadId = config.configurable.thread_id;
-            console.log(`[FirestoreCheckpointSaver] Getting checkpoint for thread_id: ${threadId}`);
+        if (!config || !config.configurable || !config.configurable.thread_id) {
+            console.warn("[FirestoreCheckpointSaver] Attempted to get checkpoint without thread_id in config.");
+            return null;
+        }
+        const threadId = config.configurable.thread_id;
+        console.log(`[FirestoreCheckpointSaver] Getting checkpoint for thread_id: ${threadId}`);
             
-            const docRef = this.collection.doc(threadId);
-            const doc = await docRef.get();
+        const docRef = this.collection.doc(threadId);
+        const doc = await docRef.get();
             
-            if (!doc.exists) {
-                console.log(`[FirestoreCheckpointSaver] No checkpoint found for thread_id: ${threadId}`);
-                return null;
-            }
+        if (!doc.exists) {
+            console.log(`[FirestoreCheckpointSaver] No checkpoint found for thread_id: ${threadId}`);
+            return null;
+        }
             
-            console.log(`[FirestoreCheckpointSaver] Checkpoint retrieved for thread_id: ${threadId}`);
-            return doc.data();
+        console.log(`[FirestoreCheckpointSaver] Checkpoint retrieved for thread_id: ${threadId}`);
+        return doc.data(); 
         } catch (error) {
             console.error(`[FirestoreCheckpointSaver] Error getting checkpoint, falling back to memory:`, error.message);
             this.firestoreHealthy = false;
@@ -128,27 +128,27 @@ class FirestoreCheckpointSaver {
         }
 
         try {
-            if (!config || !config.configurable || !config.configurable.thread_id) {
-                console.warn("[FirestoreCheckpointSaver] Attempted to getTuple without thread_id in config.");
+        if (!config || !config.configurable || !config.configurable.thread_id) {
+            console.warn("[FirestoreCheckpointSaver] Attempted to getTuple without thread_id in config.");
                 return undefined;
-            }
+        }
             
-            const threadId = config.configurable.thread_id;
-            console.log(`[FirestoreCheckpointSaver] Getting tuple for thread_id: ${threadId}`);
+        const threadId = config.configurable.thread_id;
+        console.log(`[FirestoreCheckpointSaver] Getting tuple for thread_id: ${threadId}`);
 
-            const docRef = this.collection.doc(threadId);
-            const doc = await docRef.get();
+        const docRef = this.collection.doc(threadId);
+        const doc = await docRef.get();
 
-            if (!doc.exists) {
-                console.log(`[FirestoreCheckpointSaver] No checkpoint tuple found for thread_id: ${threadId}`);
+        if (!doc.exists) {
+            console.log(`[FirestoreCheckpointSaver] No checkpoint tuple found for thread_id: ${threadId}`);
                 return undefined;
-            }
-            
-            const checkpoint = doc.data();
-            console.log(`[FirestoreCheckpointSaver] Checkpoint tuple retrieved for thread_id: ${threadId}`);
-            
-            return {
-                checkpoint: checkpoint,
+        }
+        
+        const checkpoint = doc.data();
+        console.log(`[FirestoreCheckpointSaver] Checkpoint tuple retrieved for thread_id: ${threadId}`);
+        
+        return {
+            checkpoint: checkpoint,
                 config: config,
                 parentConfig: null
             };
@@ -165,17 +165,17 @@ class FirestoreCheckpointSaver {
         }
 
         try {
-            if (!config || !config.configurable || !config.configurable.thread_id) {
-                console.error("[FirestoreCheckpointSaver] Attempted to put checkpoint without thread_id in config.");
+        if (!config || !config.configurable || !config.configurable.thread_id) {
+            console.error("[FirestoreCheckpointSaver] Attempted to put checkpoint without thread_id in config.");
                 return this.fallbackSaver.put(config, checkpoint);
-            }
+        }
             
-            const threadId = config.configurable.thread_id;
-            console.log(`[FirestoreCheckpointSaver] Putting checkpoint for thread_id: ${threadId}`);
+        const threadId = config.configurable.thread_id;
+        console.log(`[FirestoreCheckpointSaver] Putting checkpoint for thread_id: ${threadId}`);
             
-            await this.collection.doc(threadId).set(checkpoint);
-            console.log(`[FirestoreCheckpointSaver] Checkpoint saved for thread_id: ${threadId}`);
-            return Promise.resolve();
+        await this.collection.doc(threadId).set(checkpoint);
+        console.log(`[FirestoreCheckpointSaver] Checkpoint saved for thread_id: ${threadId}`);
+        return Promise.resolve();
         } catch (error) {
             console.error(`[FirestoreCheckpointSaver] Error saving checkpoint, falling back to memory:`, error.message);
             this.firestoreHealthy = false;
@@ -354,77 +354,39 @@ class CSAAgent {
 
     _createCsaWorkflow() {
         console.log("[CSAAgent] Creating CSA workflow...");
+        
+        // Use proper channels format for LangGraph 0.2.73 with simple replacement operator
         const workflow = new StateGraph({
             channels: {
-                // Define the shape of your state object here
-                user_input: {
-                    value: (x, y) => y ?? x,
-                    default: () => null
-                },
-                intent: {
-                    value: (x, y) => y ?? x,
-                    default: () => null
-                },
-                entities: {
-                    value: (x, y) => y ?? x,
-                    default: () => []
-                },
-                sentiment: {
-                    value: (x, y) => y ?? x,
-                    default: () => ({ score: 0, magnitude: 0, label: "neutral" })
-                },
-                language: {
-                    value: (x, y) => y ?? x,
-                    default: () => "en"
-                },
-                nlu_confidence: {
-                    value: (x, y) => y ?? x,
-                    default: () => 0
-                },
-                retrieved_docs: {
-                    value: (x, y) => y ?? x,
-                    default: () => []
-                },
-                context: {
-                    value: (x, y) => y ?? x,
-                    default: () => null
-                },
-                knowledge_confidence: {
-                    value: (x, y) => y ?? x,
-                    default: () => 0
-                },
-                action_taken: {
-                    value: (x, y) => y ?? x,
-                    default: () => null
-                },
-                action_result: {
-                    value: (x, y) => y ?? x,
-                    default: () => null
-                },
-                conversation_history: {
-                    value: (x, y) => x.concat(y),
-                    default: () => []
-                },
-                final_response: {
-                    value: (x, y) => y ?? x,
-                    default: () => null
-                }
+                user_input: null,
+                intent: null,
+                entities: null,
+                sentiment: null,
+                language: null,
+                nlu_confidence: null,
+                retrieved_docs: null,
+                context: null,
+                knowledge_confidence: null,
+                action_taken: null,
+                action_result: null,
+                conversation_history: null,
+                final_response: null
             }
         });
 
-        // Internal workflow nodes (not separate agents)
-        workflow.addNode("understand", this._nluWorkflow.bind(this));
-        workflow.addNode("retrieve", this._knowledgeWorkflow.bind(this));
-        workflow.addNode("converse", this._dialogWorkflow.bind(this));
-        workflow.addNode("act", this._actionWorkflow.bind(this));
-        workflow.addNode("escalate", this._escalationWorkflow.bind(this));
+        // Internal workflow nodes (not separate agents) - Use proper function binding
+        workflow.addNode("understand", (state) => this._nluWorkflow(state));
+        workflow.addNode("retrieve", (state) => this._knowledgeWorkflow(state));
+        workflow.addNode("converse", (state) => this._dialogWorkflow(state));
+        workflow.addNode("act", (state) => this._actionWorkflow(state));
+        workflow.addNode("escalate", (state) => this._escalationWorkflow(state));
 
         // Workflow routing logic
         workflow.setEntryPoint("understand");
 
         workflow.addConditionalEdges(
             "understand",
-            this._routeAfterNlu.bind(this),
+            (state) => this._routeAfterNlu(state),
             {
                 "need_info": "retrieve",
                 "need_action": "act",
@@ -435,7 +397,7 @@ class CSAAgent {
 
         workflow.addConditionalEdges(
             "retrieve",
-            this._routeAfterKnowledge.bind(this),
+            (state) => this._routeAfterKnowledge(state),
             {
                 "respond": "converse",
                 "need_more": "understand", // Loop back for more NLU or clarification
@@ -448,7 +410,16 @@ class CSAAgent {
         workflow.addEdge("escalate", END);  // Escalation is a final step
 
         console.log("[CSAAgent] Compiling main workflow...");
-        return workflow.compile({ checkpointer: this.memory });
+        
+        // Compile without checkpointer to avoid binding issues
+        try {
+            const compiledWorkflow = workflow.compile();
+            console.log("[CSAAgent] Workflow compiled successfully without checkpointer");
+            return compiledWorkflow;
+        } catch (error) {
+            console.error("[CSAAgent] Error compiling workflow:", error);
+            throw error;
+        }
     }
 
     async _nluWorkflow(state) {
@@ -619,7 +590,7 @@ class CSAAgent {
                 context: state.context || "No specific context available.",
                 user_input: state.user_input,
                 intent: state.intent,
-                sentiment: state.sentiment.label || "neutral",
+                sentiment: state.sentiment?.label || "neutral",
             });
 
         } catch (error) {
@@ -725,7 +696,7 @@ class CSAAgent {
 
     // Update routing to ensure escalate_to_human goes to the action workflow first
     async _routeAfterNlu(state) {
-        console.log("[CSAAgent Router] NLU routing. Intent:", state.intent, "Confidence:", state.nlu_confidence, "Sentiment:", state.sentiment.label);
+        console.log("[CSAAgent Router] NLU routing. Intent:", state.intent, "Confidence:", state.nlu_confidence, "Sentiment:", state.sentiment?.label || 'neutral');
         
         if (state.intent === 'nlu_error') {
             return "escalate";
@@ -787,24 +758,17 @@ class CSAAgent {
         };
         const config = { configurable: { thread_id: threadId || "default_thread-" + Date.now() } }; // Manage conversation threads
 
-        let finalState = initialState;
-        for await (const item of await this.mainWorkflow.stream(initialState, config)) {
-            // console.log("Workflow step output:", item);
-            // The final state will be the last key in the stream result (name of the END node or last active node)
-            const nodeName = Object.keys(item)[0];
-            console.log(`[CSAAgent Stream] Node: ${nodeName}, State:`, item[nodeName]);
-            if(item[END]){
-                finalState = item[END];
-                break;
-            }
-             // Heuristic: if it's not an END node, the last processed node's state is what we capture
-            // This might need refinement depending on how you define your graph's END states.
-            finalState = item[nodeName];
+        console.log("[CSAAgent] Starting workflow execution...");
+        try {
+            // Use invoke instead of stream for simpler debugging
+            const finalState = await this.mainWorkflow.invoke(initialState, config);
+            console.log("[CSAAgent] Workflow execution completed successfully");
+            return finalState?.final_response || "No response generated.";
+        } catch (error) {
+            console.error("[CSAAgent] Workflow execution failed:", error);
+            throw error;
         }
-        
-        console.log("[CSAAgent] Final processing state:", finalState);
-        // Return the final response or relevant parts of the state
-        return finalState?.final_response || "No response generated.";
+
     }
 }
 
