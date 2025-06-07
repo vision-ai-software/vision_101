@@ -39,7 +39,8 @@ jobs:
         run: |
           gcloud builds submit . \
             --config=infrastructure/cloudbuild.yaml \
-            --substitutions=COMMIT_SHA=${{ github.sha }}
+            --substitutions=COMMIT_SHA=${{ github.sha }} \
+            --no-source
         env:
           PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
 
