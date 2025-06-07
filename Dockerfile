@@ -1,32 +1,39 @@
 # Use an official Node.js runtime as a parent image
 FROM node:18-slim
 
+# Install curl for health checks
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
 # Create app directory
 WORKDIR /usr/src/app
 
-# Copy package.json and package-lock.json (if you use it)
-# This assumes all necessary dependencies for the backend are in the root package.json
-COPY package.json ./
-# COPY package-lock.json ./ 
-# If you have a yarn.lock, copy that instead and use yarn commands below
-# COPY yarn.lock ./
+# Copy package files for dependency installation
+# Using root package.json which contains all dependencies
+COPY package.json package-lock.json ./
 
 # Install app dependencies
 # Using --only=production to skip devDependencies in the final image
 RUN npm install --only=production
-# If you were using yarn: 
-# RUN yarn install --production
 
-# Bundle app source
+# Bundle app source (copy all application files)
 COPY . .
 
-# Your backend app likely runs on a port, e.g., 8080 or specified by an environment variable PORT
-# Cloud Run injects the PORT environment variable, which your app should listen on.
-# Defaulting to 8080 if PORT is not set by the platform.
-ENV PORT 8080
+# Create a non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+RUN chown -R appuser:appuser /usr/src/app
+USER appuser
+
+# Cloud Run injects the PORT environment variable
+# Default to 8080 if PORT is not set by the platform
+ENV PORT=8080
+ENV NODE_ENV=production
+
+# Expose the port
 EXPOSE 8080
 
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:${PORT}/health || exit 1
+
 # Define the command to run your backend application
-# This should be the command that starts your Express server (or similar)
-# Assuming backend/src/index.js is your main entry point for the server
-CMD ["node", "backend/src/index.js"] 
+CMD ["node", "backend/src/server.js"] 

@@ -450,20 +450,89 @@ class CSAAgent {
                 label: docSentiment.score > 0.25 ? "positive" : docSentiment.score < -0.25 ? "negative" : "neutral"
             };
 
-            // --- Basic Rule-based Intent Detection (from langchain_integration.js) ---
+            // --- Enhanced Rule-based Intent Detection ---
             const lowerText = query.toLowerCase();
-            if (lowerText.includes('order status') || lowerText.includes('where is my order') || lowerText.includes('track my order')) {
+            
+            // Order Status Intent - Enhanced patterns
+            const orderStatusPatterns = [
+                /order\s*(status|tracking|update)/,
+                /where\s*(is|are)\s*my\s*(order|package|shipment)/,
+                /track\s*(my\s*)?(order|package|shipment)/,
+                /(delivery|shipping)\s*status/,
+                /when\s*will\s*(my\s*)?(order|package)\s*(arrive|be\s*delivered)/,
+                /order\s*#?\s*\d+/,
+                /(check|find)\s*(my\s*)?(order|delivery)/
+            ];
+            
+            // Escalation Intent - Enhanced patterns  
+            const escalationPatterns = [
+                /speak\s*(to|with)\s*(human|agent|person|representative)/,
+                /transfer\s*(me\s*)?to\s*(human|agent|person)/,
+                /(human|agent|person|representative)\s*help/,
+                /escalate/,
+                /(talk|speak)\s*(to|with)\s*someone/,
+                /not\s*helping|can't\s*help|unable\s*to\s*help/,
+                /this\s*(isn't|is\s*not)\s*working/,
+                /frustrated|angry|upset/,
+                /complaint|complain/,
+                /manager|supervisor/
+            ];
+            
+            // Question Intent - Enhanced patterns
+            const questionPatterns = [
+                /^(what|how|why|when|where|who|which)/,
+                /\?$/,
+                /(can\s*you|could\s*you)\s*(help|tell|explain)/,
+                /(do\s*you|does)\s*(have|know|support)/,
+                /(is\s*it|are\s*there)\s*possible/,
+                /help\s*(me\s*)?(with|understand)/,
+                /(explain|tell\s*me\s*about)/
+            ];
+            
+            // Support/Help Intent
+            const supportPatterns = [
+                /^(help|support|assist)/,
+                /(need|want)\s*(help|support|assistance)/,
+                /(having\s*)?(trouble|problem|issue|difficulty)/,
+                /(can't|cannot|unable\s*to)/,
+                /not\s*working|broken|error/
+            ];
+            
+            // Greeting Intent
+            const greetingPatterns = [
+                /^(hi|hello|hey|good\s*(morning|afternoon|evening))/,
+                /^(thanks|thank\s*you)/,
+                /^(bye|goodbye|see\s*you)/
+            ];
+            
+            // Product Information Intent
+            const productInfoPatterns = [
+                /(price|cost|pricing)/,
+                /(feature|specification|specs)/,
+                /(available|availability)/,
+                /(compatible|compatibility)/,
+                /(warranty|guarantee)/
+            ];
+            
+            // Check patterns in order of specificity
+            if (orderStatusPatterns.some(pattern => pattern.test(lowerText))) {
                 intent = 'check_order_status';
-            } else if (lowerText.includes('human') || lowerText.includes('agent') || lowerText.includes('escalate')) {
+            } else if (escalationPatterns.some(pattern => pattern.test(lowerText))) {
                 intent = 'escalate_to_human';
-            } else if (lowerText.endsWith('?') || lowerText.startsWith('what') || lowerText.startsWith('how') || lowerText.startsWith('why')) {
+            } else if (greetingPatterns.some(pattern => pattern.test(lowerText))) {
+                intent = 'greeting';
+            } else if (supportPatterns.some(pattern => pattern.test(lowerText))) {
+                intent = 'request_support';
+            } else if (productInfoPatterns.some(pattern => pattern.test(lowerText))) {
+                intent = 'product_inquiry';
+            } else if (questionPatterns.some(pattern => pattern.test(lowerText))) {
                 intent = 'ask_question';
             }
-            // --- End Rule-based Intent Detection ---
+            // --- End Enhanced Rule-based Intent Detection ---
             
-            // TODO: Implement more advanced NLU steps from OAP plan if needed:
-            // language = await this._detectLanguage(query); // e.g., using a language detection library or service
-            // nlu_confidence = await this._calculateConfidence(intent, entities, sentiment_analysis.label);
+            // Implement more advanced NLU steps
+            language = await this._detectLanguage(query);
+            nlu_confidence = await this._calculateConfidence(intent, entities, sentiment_analysis.label, query);
 
         } catch (error) {
             console.error("[CSAAgent NLU] Error during NLU processing:", error);
@@ -614,10 +683,70 @@ class CSAAgent {
         // Determine what action to take based on intent and entities
         if (state.intent === 'escalate_to_human') {
             required_action = "create_hubspot_ticket";
-        } else if (state.intent === 'check_order_status' && state.entities && state.entities.length > 0) {
-            // Future: implement order status check
+        } else if (state.intent === 'check_order_status') {
             required_action = "check_order_status";
-            action_result = "Order status check not yet implemented.";
+            
+            // Extract order ID from entities or user input
+            let orderId = null;
+            if (state.entities && state.entities.length > 0) {
+                // Look for numeric entities that could be order IDs
+                const orderEntity = state.entities.find(entity => 
+                    entity.type === 'NUMBER' || 
+                    (entity.name && /\d{3,}/.test(entity.name)) ||
+                    entity.type === 'OTHER' && /\d{3,}/.test(entity.name)
+                );
+                if (orderEntity) {
+                    orderId = orderEntity.name || orderEntity.text;
+                }
+            }
+            
+            // If no order ID found in entities, try to extract from user input
+            if (!orderId) {
+                const orderIdMatch = state.user_input.match(/(?:order|#|id)\s*:?\s*(\w+\d+|\d+\w*|\d{3,})/i);
+                if (orderIdMatch) {
+                    orderId = orderIdMatch[1];
+                }
+            }
+            
+            if (orderId) {
+                try {
+                    console.log(`[CSAAgent Action] Checking order status for ID: ${orderId}`);
+                    
+                    // Use the integration service to get order status
+                    const orderStatusResult = await this.integrationService.callIntegrationService('get_order_status', { orderId });
+                    
+                    if (orderStatusResult && orderStatusResult.status) {
+                        action_result = {
+                            success: true,
+                            message: `Order ${orderId} status: ${orderStatusResult.status}`,
+                            details: orderStatusResult
+                        };
+                    } else if (orderStatusResult && typeof orderStatusResult === 'object') {
+                        action_result = {
+                            success: true,
+                            message: `I found information about order ${orderId}`,
+                            details: orderStatusResult
+                        };
+                    } else {
+                        action_result = {
+                            success: false,
+                            message: `I wasn't able to retrieve status for order ${orderId}. This might be due to the order number being incorrect or the order not being found in our system.`
+                        };
+                    }
+                } catch (error) {
+                    console.error(`[CSAAgent Action] Error checking order status for ${orderId}:`, error);
+                    action_result = {
+                        success: false,
+                        message: `I encountered an issue while checking the status of order ${orderId}. Please try again later or contact our support team with your order number.`,
+                        error: error.message
+                    };
+                }
+            } else {
+                action_result = {
+                    success: false,
+                    message: "I'd be happy to help you check your order status! Could you please provide your order number? It's usually a series of numbers and letters you received when you placed your order."
+                };
+            }
         }
         // Add more action mappings as needed
 
@@ -694,50 +823,204 @@ class CSAAgent {
         };
     }
 
-    // Update routing to ensure escalate_to_human goes to the action workflow first
+    // Enhanced routing to handle all new intent types
     async _routeAfterNlu(state) {
         console.log("[CSAAgent Router] NLU routing. Intent:", state.intent, "Confidence:", state.nlu_confidence, "Sentiment:", state.sentiment?.label || 'neutral');
         
+        // Error handling - escalate immediately
         if (state.intent === 'nlu_error') {
+            console.log("[CSAAgent Router] NLU error detected, escalating");
             return "escalate";
         }
+        
+        // Direct escalation requests
         if (state.intent === 'escalate_to_human') {
-            return "escalate"; // This will now handle ticket creation
+            console.log("[CSAAgent Router] Direct escalation request, routing to escalation workflow");
+            return "escalate";
         }
-        if (state.intent === 'ask_question' || state.nlu_confidence < 0.6) {
-            return "need_info";
-        } else if (state.intent === 'check_order_status') {
+        
+        // Action-required intents
+        if (state.intent === 'check_order_status') {
+            console.log("[CSAAgent Router] Order status request, routing to action workflow");
             return "need_action";
+        }
+        
+        // Simple greeting - can respond directly with knowledge base
+        if (state.intent === 'greeting') {
+            console.log("[CSAAgent Router] Greeting detected, proceeding to knowledge base");
+            return "need_info";
+        }
+        
+        // Support and product inquiries - need knowledge base lookup
+        if (state.intent === 'request_support' || state.intent === 'product_inquiry' || state.intent === 'ask_question') {
+            console.log("[CSAAgent Router] Information request, proceeding to knowledge base");
+            return "need_info";
+        }
+        
+        // Low confidence fallback
+        if (state.nlu_confidence < 0.4) {
+            console.log("[CSAAgent Router] Low NLU confidence, escalating");
+            return "escalate";
+        } else if (state.nlu_confidence < 0.6) {
+            console.log("[CSAAgent Router] Medium-low NLU confidence, trying knowledge base");
+            return "need_info";
         } else {
-            return "continue_chat";
+            console.log("[CSAAgent Router] Good confidence, continuing to knowledge base");
+            return "need_info";  // Changed from "continue_chat" to "need_info" for knowledge lookup
         }
     }
 
     // --- Routing Logic --- 
     async _routeAfterKnowledge(state) {
-        console.log("[CSAAgent Router] Knowledge routing. Confidence:", state.knowledge_confidence);
-        // TODO: Implement routing logic based on knowledge retrieval output
+        console.log("[CSAAgent Router] Knowledge routing. Confidence:", state.knowledge_confidence, "Intent:", state.intent, "Sentiment:", state.sentiment?.label);
+        
+        // High confidence - we have good knowledge to answer
         if (state.knowledge_confidence > 0.8) {
+            console.log("[CSAAgent Router] High confidence knowledge found, proceeding to respond");
             return "respond";
-        } else if (state.knowledge_confidence > 0.5) {
-            // Maybe ask for clarification or try NLU again with more context
-            return "need_more"; 
-        } else {
-            return "escalate"; // Or a different path if KB fails badly
+        } 
+        
+        // Medium confidence - depends on intent and sentiment
+        else if (state.knowledge_confidence > 0.5) {
+            // If user seems frustrated or explicitly asks for human help, escalate
+            if (state.sentiment?.label === 'negative' && state.sentiment?.score < -0.3) {
+                console.log("[CSAAgent Router] Medium confidence but negative sentiment, escalating");
+                return "escalate";
+            }
+            // If it's a simple question, try to respond with what we have
+            else if (state.intent === 'ask_question') {
+                console.log("[CSAAgent Router] Medium confidence for simple question, proceeding to respond");
+                return "respond";
+            }
+            // For complex intents with medium confidence, ask for clarification
+            else {
+                console.log("[CSAAgent Router] Medium confidence, asking for more information");
+                return "need_more";
+            }
+        } 
+        
+        // Low confidence - check if we should escalate or try action workflow
+        else {
+            // If user is asking for specific actions (order status, etc.), try action workflow
+            if (state.intent === 'check_order_status' || state.intent === 'escalate_to_human') {
+                console.log("[CSAAgent Router] Low knowledge confidence but action intent detected, routing to action");
+                return "need_action";
+            }
+            // If user seems frustrated or this is a complex query, escalate
+            else if (state.sentiment?.label === 'negative' || state.nlu_confidence < 0.4) {
+                console.log("[CSAAgent Router] Low confidence with negative sentiment or low NLU confidence, escalating");
+                return "escalate";
+            }
+            // Otherwise, try to respond with a helpful message about not finding information
+            else {
+                console.log("[CSAAgent Router] Low confidence, but attempting helpful response");
+                return "respond";
+            }
         }
     }
     
-    // --- Helper methods for workflows (to be implemented) ---
-    // async _classifyIntent(query) { /* ... */ }
-    // async _extractEntities(query) { /* ... */ }
-    // async _analyzeSentiment(query) { /* ... */ }
-    // async _detectLanguage(query) { /* ... */ }
-    // async _calculateConfidence(intent, entities) { /* ... */ }
-    // async _retrieveDocuments(query) { /* ... */ }
-    // async _rerankByRelevance(docs, intent) { /* ... */ }
-    // async _buildContext(rerankedDocs) { /* ... */ }
-    // async _assessKnowledgeQuality(context) { /* ... */ }
-    // async _determineAction(intent, entities) { /* ... */ }
+    // --- Helper methods for workflows ---
+    
+    async _detectLanguage(query) {
+        try {
+            // Use Google Cloud Natural Language API for language detection
+            const document = {
+                content: query,
+                type: 'PLAIN_TEXT',
+            };
+            
+            const [result] = await this.languageClient.analyzeEntitySentiment({ document });
+            
+            // The language is typically returned in the response metadata
+            // For now, we'll use a simple approach and default to English
+            // In production, you might want to use the detect language endpoint specifically
+            if (query.length < 10) {
+                return 'en'; // Default for short queries
+            }
+            
+            // Simple language detection based on character patterns
+            const hasAsianCharacters = /[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf\u3400-\u4dbf]/.test(query);
+            const hasArabicCharacters = /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]/.test(query);
+            const hasRussianCharacters = /[\u0400-\u04ff]/.test(query);
+            
+            if (hasAsianCharacters) return 'ja'; // or 'zh', 'ko' depending on more specific detection
+            if (hasArabicCharacters) return 'ar';
+            if (hasRussianCharacters) return 'ru';
+            
+            return 'en'; // Default to English
+        } catch (error) {
+            console.error("[CSAAgent NLU] Error during language detection:", error);
+            return 'en'; // Default to English on error
+        }
+    }
+    
+    async _calculateConfidence(intent, entities, sentimentLabel, query) {
+        try {
+            let baseConfidence = 0.5; // Start with medium confidence
+            
+            // Adjust confidence based on intent detection
+            if (intent === 'unknown_intent' || intent === 'nlu_error') {
+                baseConfidence = 0.2;
+            } else if (intent === 'escalate_to_human') {
+                // High confidence for explicit escalation requests
+                if (query.toLowerCase().includes('human') || query.toLowerCase().includes('agent')) {
+                    baseConfidence = 0.9;
+                } else {
+                    baseConfidence = 0.7;
+                }
+            } else if (intent === 'check_order_status') {
+                // High confidence if order-related keywords are present
+                const orderKeywords = ['order', 'status', 'track', 'delivery', 'shipment'];
+                const hasOrderKeywords = orderKeywords.some(keyword => 
+                    query.toLowerCase().includes(keyword)
+                );
+                baseConfidence = hasOrderKeywords ? 0.85 : 0.6;
+            } else if (intent === 'ask_question') {
+                // Medium to high confidence for questions
+                const questionWords = ['what', 'how', 'why', 'when', 'where', 'who'];
+                const hasQuestionWords = questionWords.some(word => 
+                    query.toLowerCase().includes(word)
+                );
+                const endsWithQuestionMark = query.trim().endsWith('?');
+                
+                if (hasQuestionWords || endsWithQuestionMark) {
+                    baseConfidence = 0.8;
+                } else {
+                    baseConfidence = 0.6;
+                }
+            }
+            
+            // Adjust confidence based on entities
+            if (entities && entities.length > 0) {
+                // More entities generally mean better understanding
+                const entityBonus = Math.min(entities.length * 0.1, 0.2);
+                baseConfidence += entityBonus;
+            } else if (intent !== 'escalate_to_human') {
+                // Lack of entities for non-escalation intents reduces confidence
+                baseConfidence -= 0.1;
+            }
+            
+            // Adjust confidence based on sentiment certainty
+            if (sentimentLabel === 'negative' || sentimentLabel === 'positive') {
+                baseConfidence += 0.05; // Clear sentiment adds small confidence boost
+            }
+            
+            // Adjust confidence based on query length and complexity
+            const wordCount = query.split(/\s+/).length;
+            if (wordCount < 3) {
+                baseConfidence -= 0.1; // Very short queries are harder to understand
+            } else if (wordCount > 20) {
+                baseConfidence -= 0.05; // Very long queries might be complex
+            }
+            
+            // Ensure confidence stays within valid range
+            return Math.max(0.1, Math.min(0.95, baseConfidence));
+            
+        } catch (error) {
+            console.error("[CSAAgent NLU] Error calculating confidence:", error);
+            return 0.5; // Default medium confidence on error
+        }
+    }
 
     // Main entry point for processing a message
     async processMessage(userInput, threadId) {

@@ -14,16 +14,21 @@ steps:
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args: [
-        'run', 'deploy', 'csa-agent-backend-service', # Replace with your Cloud Run service name
+        'run', 'deploy', 'csa-agent-backend-service',
         '--image', 'gcr.io/$PROJECT_ID/csa-agent-backend:$COMMIT_SHA',
-        '--region', 'us-central1', # Replace with your desired region
+        '--region', 'us-central1',
         '--platform', 'managed',
-        '--quiet', # Suppresses interactive prompts
-        '--allow-unauthenticated', # Remove if you want to restrict access
-        # Example: Setting an environment variable from a substitution
-        # '--update-env-vars', 'DB_HOST=$_DB_HOST', 
-        # Add other environment variables as needed, e.g., DB_USER, DB_PASSWORD, etc.
-        # Remember to configure these substitutions in your Cloud Build trigger or pass them during manual build submission.
+        '--quiet',
+        '--allow-unauthenticated',
+        '--port', '8080',
+        '--memory', '1Gi',
+        '--cpu', '1',
+        '--timeout', '300',
+        '--max-instances', '10',
+        '--set-env-vars', 'NODE_ENV=production',
+        # Add other environment variables as needed:
+        # '--update-env-vars', 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID',
+        # '--update-env-vars', 'LOG_LEVEL=info'
       ]
     id: 'Deploy to Cloud Run'
     waitFor: ['Push to GCR']
