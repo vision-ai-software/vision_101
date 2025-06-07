@@ -1,0 +1,53 @@
+name: Deploy to Development
+
+on:
+  push:
+    branches:
+      - develop
+      - feature/*
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  deploy-dev:
+    name: Deploy to Development Environment
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: 'google-github-actions/auth@v2'
+        with:
+          credentials_json: '${{ secrets.GIT_SA_KEY }}'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy to Development Cloud Run
+        run: |
+          gcloud builds submit . \
+            --config=infrastructure/cloudbuild-dev.yaml \
+            --substitutions=COMMIT_SHA=${{ github.sha }},_ENV=development \
+            --suppress-logs
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Comment deployment URL on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🚀 Development deployment ready at: https://csa-agent-dev-service-[PROJECT-ID].uc.r.appspot.com'
+            }) 

@@ -1,0 +1,34 @@
+steps:
+  # 1. Build the Docker image for development
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/csa-agent-backend-dev:$COMMIT_SHA', '.']
+    id: 'Build Docker Image'
+
+  # 2. Push to GCR with dev tag
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/csa-agent-backend-dev:$COMMIT_SHA']
+    id: 'Push to GCR'
+    waitFor: ['Build Docker Image']
+
+  # 3. Deploy to Development Cloud Run (separate service)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args: [
+        'run', 'deploy', 'csa-agent-backend-dev-service',
+        '--image', 'gcr.io/$PROJECT_ID/csa-agent-backend-dev:$COMMIT_SHA',
+        '--region', 'us-central1',
+        '--platform', 'managed',
+        '--quiet',
+        '--allow-unauthenticated',
+        '--port', '8080',
+        '--memory', '512Mi',  # Less resources for dev
+        '--cpu', '1',
+        '--timeout', '300',
+        '--max-instances', '3',  # Fewer instances for dev
+        '--set-env-vars', 'NODE_ENV=development,LOG_LEVEL=debug'
+      ]
+    id: 'Deploy to Development Cloud Run'
+    waitFor: ['Push to GCR']
+
+images:
+  - 'gcr.io/$PROJECT_ID/csa-agent-backend-dev:$COMMIT_SHA' 
