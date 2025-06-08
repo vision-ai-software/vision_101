@@ -1,11 +1,13 @@
-name: Deploy to PRODUCTION
+name: Deploy to PRODUCTION - DISABLED
 
 on:
-  # Only deploy to production manually or on release tags
-  workflow_dispatch: # Manual triggering only
-  push:
-    tags:
-      - 'v*' # Deploy only on version tags like v1.0.0
+  # DEPLOYMENT PAUSED DURING DEVELOPMENT - Uncomment lines below to re-enable
+  workflow_dispatch:
+    inputs:
+      confirm_deployment:
+        description: 'Type DEPLOY to confirm production deployment'
+        required: true
+        default: 'DISABLED'
 
 jobs:
   build-and-deploy:
@@ -16,6 +18,15 @@ jobs:
       id-token: 'write' # Required for Workload Identity Federation
 
     steps:
+      - name: Safety Check - Prevent Accidental Deployment
+        run: |
+          if [ "${{ github.event.inputs.confirm_deployment }}" != "DEPLOY" ]; then
+            echo "❌ DEPLOYMENT BLOCKED: Production deployment is currently DISABLED"
+            echo "To deploy, type 'DEPLOY' in the confirmation input"
+            exit 1
+          fi
+          echo "✅ DEPLOYMENT CONFIRMED: Proceeding with production deployment"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
