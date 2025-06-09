@@ -559,66 +559,29 @@ class CSAAgent {
 
     async _knowledgeWorkflow(state) {
         console.log("[CSAAgent KB] Processing query for KB:", state.user_input);
-        let retrieved_article = null;
         let context = "No relevant information found in the knowledge base.";
         let knowledge_confidence = 0.0;
+        let retrieved_articles = [];
 
         try {
-            const queryForKB = state.intent === 'ask_question' || state.intent === 'unknown_intent' ? state.user_input : state.intent;
-            retrieved_article = await getKnowledgeBaseArticle(queryForKB);
+            retrieved_articles = await this.dbService.getKnowledgeBaseArticle(state.user_input);
 
-            if (retrieved_article && retrieved_article.source !== 'database_error') {
-                if (retrieved_article.content && retrieved_article.content.trim() !== "") {
-                    console.log(`[CSAAgent KB] Found article: ${retrieved_article.title}, Relevance: ${retrieved_article.relevance}. Attempting to generate context with LLM.`);
-                    
-                    try {
-                        const contextChain = RunnableSequence.from([
-                            this.contextGenerationPrompt,
-                            this.chatModel,
-                            new StringOutputParser(),
-                        ]);
-
-                        const generatedContext = await contextChain.invoke({
-                            article_content: retrieved_article.content,
-                            user_query: state.user_input 
-                        });
-                        
-                        if (generatedContext && !generatedContext.toLowerCase().includes("does not contain relevant information")) {
-                            context = generatedContext;
-                            knowledge_confidence = 0.85; // Higher confidence for LLM-processed context
-                            console.log("[CSAAgent KB] Successfully generated context with LLM:", context);
-                        } else {
-                            context = "I found an article, but it doesn't seem to directly answer your question. " + (generatedContext || "");
-                            knowledge_confidence = 0.4; // Lower confidence if LLM determines not relevant or empty
-                            console.log("[CSAAgent KB] LLM indicated article content not relevant or returned empty.");
-                        }
-
-                    } catch (llmError) {
-                        console.error("[CSAAgent KB] Error during LLM context generation:", llmError);
-                        context = "I found an article, but had trouble processing its content for your query. Using raw content.";
-                        // Fallback to using raw content if LLM fails, but with adjusted confidence
-                        context = retrieved_article.content; 
-                        knowledge_confidence = 0.5; // Confidence that we have raw content, but processing failed
-                    }
+            if (retrieved_articles && retrieved_articles.length > 0) {
+                if (retrieved_articles[0].source === 'database_error') {
+                    context = "There was an issue accessing the knowledge base.";
+                    knowledge_confidence = 0.1;
                 } else {
-                    context = `Found an article titled "${retrieved_article.title}", but it has no content.`;
-                    knowledge_confidence = 0.1; // Low confidence as article is empty
-                    console.log(`[CSAAgent KB] Found article: ${retrieved_article.title}, but it has no content.`);
+                    console.log(`[CSAAgent KB] Retrieved ${retrieved_articles.length} articles. Synthesizing...`);
+                    // Synthesize the content from multiple articles into a single context
+                    context = await this._synthesizeKnowledge(state.user_input, retrieved_articles);
+                    // Confidence is based on the relevance of the top retrieved doc
+                    knowledge_confidence = retrieved_articles[0].relevance || 0.8; 
                 }
-            } else if (retrieved_article && retrieved_article.source === 'database_error') {
-                console.error("[CSAAgent KB] Error fetching article from database.");
-                context = "There was an issue accessing the knowledge base.";
-                knowledge_confidence = 0.1;
             } else {
-                console.log("[CSAAgent KB] No article found for query.");
+                console.log("[CSAAgent KB] No articles found for query.");
                 // context remains "No relevant information..."
                 knowledge_confidence = 0.2;
             }
-
-            // TODO: Implement RAG - Re-rank (if multiple docs were retrieved)
-            // const reranked_docs = await this._rerankByRelevance(docs, state.intent);
-            // Note: The current getKnowledgeBaseArticle seems to return one article. Re-ranking would apply if it returned multiple candidates.
-
         } catch (error) {
             console.error("[CSAAgent KB] Error during knowledge processing:", error);
             context = "An error occurred while trying to access knowledge.";
@@ -627,10 +590,50 @@ class CSAAgent {
 
         return {
             ...state,
-            retrieved_docs: retrieved_article ? [retrieved_article] : [], // Store as an array
+            retrieved_docs: retrieved_articles || [], // Store all retrieved articles
             context,
             knowledge_confidence,
         };
+    }
+
+    async _synthesizeKnowledge(userInput, articles) {
+        console.log("[CSAAgent KB] Synthesizing knowledge for user input:", userInput);
+        
+        const synthesisPrompt = new ChatPromptTemplate({
+            inputVariables: ["user_input", "knowledge_articles"],
+            template: `Based ONLY on the following context articles, provide a comprehensive answer to the user's question. If the articles do not contain the answer, state that you couldn't find the information. Do not use any outside knowledge.
+
+Context Articles:
+---
+{knowledge_articles}
+---
+
+User Question: {user_input}
+
+Comprehensive Answer:`,
+        });
+
+        const synthesisChain = RunnableSequence.from([
+            synthesisPrompt,
+            this.chatModel,
+            new StringOutputParser(),
+        ]);
+        
+        // Format articles into a single string for the prompt
+        const formattedArticles = articles.map((art, i) => 
+            `Article ${i+1} (Source: ${art.source}, Relevance: ${art.relevance.toFixed(2)}):\nTitle: ${art.title}\nContent: ${art.content}`
+        ).join('\n\n');
+
+        try {
+            const synthesizedResponse = await synthesisChain.invoke({
+                user_input: userInput,
+                knowledge_articles: formattedArticles,
+            });
+            return synthesizedResponse;
+        } catch (error) {
+            console.error("[CSAAgent KB] Error during knowledge synthesis:", error);
+            return "I found some information, but had trouble summarizing it. Please ask me again.";
+        }
     }
 
     async _dialogWorkflow(state) {
@@ -647,6 +650,11 @@ class CSAAgent {
                 return msg.content; // Fallback
             }).join("\n");
 
+            // NEW: Add current intent and entities to the context for the LLM
+            const recent_intent = state.intent || 'none';
+            // Safely stringify entities, defaulting to an empty object
+            const extracted_entities = state.entities ? JSON.stringify(state.entities) : '{}';
+
             // Construct the chain for this dialog turn
             const dialogChain = RunnableSequence.from([
                 this.dialogPrompt,
@@ -658,7 +666,8 @@ class CSAAgent {
                 history: formattedHistory,
                 context: state.context || "No specific context available.",
                 user_input: state.user_input,
-                intent: state.intent,
+                intent: recent_intent,
+                entities: extracted_entities, // Pass the new context here
                 sentiment: state.sentiment?.label || "neutral",
             });
 
@@ -676,105 +685,81 @@ class CSAAgent {
     }
 
     async _actionWorkflow(state) {
-        console.log("[CSAAgent Action] Determining action for intent:", state.intent);
-        let required_action = null;
+        console.log(`[CSAAgent Action] Routing intent: "${state.intent}" with entities:`, state.entities);
         let action_result = "No action performed.";
+        // The intent directly maps to the action now, unless there's no action to take.
+        let required_action = state.intent;
+        const { entities } = state;
 
-        // Determine what action to take based on intent and entities
-        if (state.intent === 'escalate_to_human') {
-            required_action = "create_hubspot_ticket";
-        } else if (state.intent === 'check_order_status') {
-            required_action = "check_order_status";
-            
-            // Extract order ID from entities or user input
-            let orderId = null;
-            if (state.entities && state.entities.length > 0) {
-                // Look for numeric entities that could be order IDs
-                const orderEntity = state.entities.find(entity => 
-                    entity.type === 'NUMBER' || 
-                    (entity.name && /\d{3,}/.test(entity.name)) ||
-                    entity.type === 'OTHER' && /\d{3,}/.test(entity.name)
-                );
-                if (orderEntity) {
-                    orderId = orderEntity.name || orderEntity.text;
-                }
-            }
-            
-            // If no order ID found in entities, try to extract from user input
-            if (!orderId) {
-                const orderIdMatch = state.user_input.match(/(?:order|#|id)\s*:?\s*(\w+\d+|\d+\w*|\d{3,})/i);
-                if (orderIdMatch) {
-                    orderId = orderIdMatch[1];
-                }
-            }
-            
-            if (orderId) {
-                try {
-                    console.log(`[CSAAgent Action] Checking order status for ID: ${orderId}`);
-                    
-                    // Use the integration service to get order status
-                    const orderStatusResult = await this.integrationService.callIntegrationService('get_order_status', { orderId });
-                    
-                    if (orderStatusResult && orderStatusResult.status) {
-                        action_result = {
-                            success: true,
-                            message: `Order ${orderId} status: ${orderStatusResult.status}`,
-                            details: orderStatusResult
-                        };
-                    } else if (orderStatusResult && typeof orderStatusResult === 'object') {
-                        action_result = {
-                            success: true,
-                            message: `I found information about order ${orderId}`,
-                            details: orderStatusResult
-                        };
+        try {
+            switch (state.intent) {
+                case 'check_order_status':
+                    if (entities.orderId) {
+                        action_result = await this.integrationService.callIntegrationService('get_order_status', { orderId: entities.orderId });
                     } else {
-                        action_result = {
-                            success: false,
-                            message: `I wasn't able to retrieve status for order ${orderId}. This might be due to the order number being incorrect or the order not being found in our system.`
-                        };
+                        action_result = { success: false, message: "I can help with that! What's your order number?" };
                     }
-                } catch (error) {
-                    console.error(`[CSAAgent Action] Error checking order status for ${orderId}:`, error);
-                    action_result = {
-                        success: false,
-                        message: `I encountered an issue while checking the status of order ${orderId}. Please try again later or contact our support team with your order number.`,
-                        error: error.message
-                    };
-                }
-            } else {
-                action_result = {
-                    success: false,
-                    message: "I'd be happy to help you check your order status! Could you please provide your order number? It's usually a series of numbers and letters you received when you placed your order."
-                };
-            }
-        }
-        // Add more action mappings as needed
+                    break;
 
-        // Execute the action
-        if (required_action === "create_hubspot_ticket") {
-            try {
-                // Prepare conversation summary for the ticket
-                const conversationSummary = this._generateConversationSummary(state);
+                case 'track_shipment':
+                    if (entities.trackingId) {
+                        action_result = await this.integrationService.callIntegrationService('track_shipment', { trackingId: entities.trackingId });
+                    } else {
+                        action_result = { success: false, message: "Of course, what's the tracking number?" };
+                    }
+                    break;
                 
-                const ticketArgs = {
-                    title: `Escalation: ${state.user_input.substring(0, 50)}...`,
-                    description: state.user_input,
-                    customer_email: state.customer_email || "unknown@customer.com", // You might want to extract this from entities or state
-                    priority: state.sentiment && state.sentiment.label === 'negative' ? 'high' : 'medium',
-                    conversation_summary: conversationSummary
-                };
+                case 'update_shipping_address':
+                    if (entities.orderId && entities.newAddress) {
+                        action_result = await this.integrationService.callIntegrationService('update_shipping_address', { orderId: entities.orderId, newAddress: entities.newAddress });
+                    } else {
+                        action_result = { success: false, message: "I can help update that. What is the order number and the new full shipping address?" };
+                    }
+                    break;
 
-                action_result = await this.tools.hubspot_ticket.invoke(ticketArgs);
-                console.log("[CSAAgent Action] HubSpot ticket result:", action_result);
+                case 'process_refund':
+                    if (entities.orderId && entities.amount) {
+                        action_result = await this.integrationService.callIntegrationService('process_refund', { orderId: entities.orderId, amount: entities.amount, reason: entities.reason });
+                    } else {
+                        action_result = { success: false, message: "I can process a refund. What is the order number and the refund amount?" };
+                    }
+                    break;
 
-            } catch (error) {
-                console.error("[CSAAgent Action] Error creating HubSpot ticket:", error);
-                action_result = {
-                    success: false,
-                    message: "Failed to create support ticket due to technical error",
-                    error: error.message
-                };
+                case 'reset_password':
+                    if (entities.customerEmail) {
+                        action_result = await this.integrationService.callIntegrationService('reset_password', { customerEmail: entities.customerEmail });
+                    } else {
+                        action_result = { success: false, message: "I can help with that. What is the email address for the account?" };
+                    }
+                    break;
+
+                case 'escalate_to_human':
+                    const conversationSummary = this._generateConversationSummary(state);
+                    const ticketArgs = {
+                        title: `Escalation: ${state.user_input.substring(0, 50)}...`,
+                        description: state.user_input,
+                        customer_email: entities.customerEmail || "unknown@customer.com",
+                        priority: state.sentiment?.label === 'negative' ? 'high' : 'medium',
+                        conversation_summary: conversationSummary
+                    };
+                    action_result = await this.tools.hubspot_ticket.invoke(ticketArgs);
+                    console.log("[CSAAgent Action] HubSpot ticket result:", action_result);
+                    break;
+
+                default:
+                    // For intents like 'ask_question' or 'unknown_intent', no specific action is taken here.
+                    required_action = null; 
+                    action_result = "No specific action required for this intent.";
+                    console.log(`[CSAAgent Action] No specific action required for intent: "${state.intent}"`);
+                    break;
             }
+        } catch (error) {
+            console.error(`[CSAAgent Action] Error during action execution for intent "${state.intent}":`, error);
+            action_result = {
+                success: false,
+                message: `I encountered a technical issue while trying to perform the action. Please try again later.`,
+                error: error.message
+            };
         }
 
         return {

@@ -47,18 +47,17 @@ async function connectToDB() {
 }
 
 async function getKnowledgeBaseArticle(query) {
-  console.log(`[DB] Fetching KB article from PostgreSQL for query: ${query}`);
+  console.log(`[DB] Fetching KB articles from PostgreSQL for query: ${query}`);
   
   // Prepare the search query for full-text search
-  // Using plainto_tsquery for more natural language queries and handling multiple words
-  const searchQuery = query.trim().split(/\s+/).join(' & '); // Convert 'word1 word2' to 'word1 & word2' for plainto_tsquery
+  const searchQuery = query.trim().split(/\s+/).join(' & ');
 
   const sql = `
     SELECT title, content, source, ts_rank_cd(fts_document_vector, plainto_tsquery('pg_catalog.english', $1)) as relevance
     FROM knowledge_base_articles
     WHERE fts_document_vector @@ plainto_tsquery('pg_catalog.english', $1)
     ORDER BY relevance DESC
-    LIMIT 1;
+    LIMIT 3;
   `;
 
   try {
@@ -67,26 +66,27 @@ async function getKnowledgeBaseArticle(query) {
     client.release();
 
     if (rows.length > 0) {
-      console.log(`[DB] Found article for query "${query}":`, rows[0].title);
-      return {
-        title: rows[0].title,
-        content: rows[0].content,
-        source: rows[0].source,
-        relevance: rows[0].relevance
-      };
+      console.log(`[DB] Found ${rows.length} articles for query "${query}"`);
+      return rows.map(row => ({
+        title: row.title,
+        content: row.content,
+        source: row.source,
+        relevance: row.relevance
+      }));
     } else {
       console.log(`[DB] No article found for query "${query}"`);
       return null; // Or return a default object like { title: 'Not Found', content: '', source: '' }
     }
   } catch (err) {
-    console.error('[DB] Error fetching article from PostgreSQL:', err.stack);
+    console.error('[DB] Error fetching articles from PostgreSQL:', err.stack);
     // In case of an error, return null or a specific error object
     // This prevents the agent from crashing if the DB query fails.
-    return {
-        title: "Error Fetching Article",
+    return [{
+        title: "Error Fetching Articles",
         content: "Could not retrieve information from the knowledge base due to an error.",
-        source: "database_error"
-    };
+        source: "database_error",
+        relevance: 0
+    }];
   }
 }
 

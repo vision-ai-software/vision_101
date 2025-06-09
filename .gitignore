@@ -2,3 +2,4 @@
 node_modules
 service-account/vision-101-460206-62ac37f1a9dc.json
 service-account
+env.example

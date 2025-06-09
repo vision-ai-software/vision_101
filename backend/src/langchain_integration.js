@@ -71,6 +71,46 @@ const adk = {
       successMessage = "Human handoff initiated via webhook.";
       errorMessage = "Failed to initiate human handoff via integration webhook.";
 
+    } else if (action === 'track_shipment') {
+      webhookUrl = process.env.ZAPIER_N8N_TRACK_SHIPMENT_WEBHOOK_URL || 'https://hooks.zapier.com/your/placeholder/track_shipment_url';
+      if (!details || !details.trackingId) {
+        console.error('[ADK] Missing trackingId for track_shipment');
+        throw new Error('Tracking ID is required to track a shipment.');
+      }
+      requestBody = { trackingId: details.trackingId };
+      successMessage = "Shipment tracking request sent via webhook.";
+      errorMessage = "Failed to get shipment tracking via integration webhook.";
+
+    } else if (action === 'update_shipping_address') {
+      webhookUrl = process.env.ZAPIER_N8N_UPDATE_SHIPPING_ADDRESS_WEBHOOK_URL || 'https://hooks.zapier.com/your/placeholder/update_shipping_address_url';
+      if (!details || !details.orderId || !details.newAddress) {
+        console.error('[ADK] Missing orderId or newAddress for update_shipping_address');
+        throw new Error('Order ID and the new address are required to update shipping information.');
+      }
+      requestBody = { orderId: details.orderId, newAddress: details.newAddress };
+      successMessage = "Shipping address update initiated via webhook.";
+      errorMessage = "Failed to initiate shipping address update via integration webhook.";
+
+    } else if (action === 'process_refund') {
+      webhookUrl = process.env.ZAPIER_N8N_PROCESS_REFUND_WEBHOOK_URL || 'https://hooks.zapier.com/your/placeholder/process_refund_url';
+      if (!details || !details.orderId || !details.amount) {
+        console.error('[ADK] Missing orderId or amount for process_refund');
+        throw new Error('Order ID and refund amount are required to process a refund.');
+      }
+      requestBody = { orderId: details.orderId, amount: details.amount, reason: details.reason || 'Not specified' };
+      successMessage = "Refund request processed via webhook.";
+      errorMessage = "Failed to process refund via integration webhook.";
+
+    } else if (action === 'reset_password') {
+      webhookUrl = process.env.ZAPIER_N8N_RESET_PASSWORD_WEBHOOK_URL || 'https://hooks.zapier.com/your/placeholder/reset_password_url';
+      if (!details || !details.customerEmail) {
+        console.error('[ADK] Missing customerEmail for reset_password');
+        throw new Error('Customer email is required to send a password reset link.');
+      }
+      requestBody = { email: details.customerEmail };
+      successMessage = "Password reset link has been sent via webhook.";
+      errorMessage = "Failed to send password reset link via integration webhook.";
+
     } else {
       console.warn(`[ADK] Unknown integration action: ${action}`);
       return `Unknown integration action: ${action} (placeholder response)`;
@@ -83,13 +123,18 @@ const adk = {
 
     console.log(`[ADK] Calling Zapier/n8n webhook for ${action}: ${webhookUrl}`);
     try {
+      const headers = {
+        'Content-Type': 'application/json',
+      };
+
+      // Add auth token if it exists
+      if (process.env.ZAPIER_N8N_WEBHOOK_AUTH_TOKEN) {
+        headers['Authorization'] = `Bearer ${process.env.ZAPIER_N8N_WEBHOOK_AUTH_TOKEN}`;
+      }
+
       const response = await fetch(webhookUrl, {
         method: 'POST', // Assuming POST for all these actions
-        headers: {
-          'Content-Type': 'application/json',
-          // TODO: Add any common auth headers for your webhooks if needed
-          // 'X-Custom-Auth-Token': process.env.ZAPIER_N8N_WEBHOOK_AUTH_TOKEN
-        },
+        headers: headers,
         body: JSON.stringify(requestBody)
       });
 
@@ -126,12 +171,37 @@ const adk = {
     // Analyze entities
     const [entityResult] = await languageClient.analyzeEntities({ document });
 
-    // --- Basic Rule-based Intent Detection ---
+    // --- Basic Rule-based Intent Detection & Entity Extraction ---
     // ML-based intent detection model in the future.
     let intent = 'unknown_intent';
+    let extractedEntities = {}; // Object to hold our custom extracted entities
     const lowerText = text.toLowerCase();
-    if (lowerText.includes('order status') || lowerText.includes('where is my order') || lowerText.includes('track my order')) {
+    
+    // Ordered by likely specificity to avoid premature matching
+    if (lowerText.includes('order status') || lowerText.includes('where is my order')) {
       intent = 'check_order_status';
+      const orderIdMatch = text.match(/(?:order|#|id)\s*:?\s*(\w+\d+|\d+\w*|\d{3,})/i);
+      if (orderIdMatch) extractedEntities.orderId = orderIdMatch[1];
+    } else if (lowerText.includes('track') && (lowerText.includes('shipment') || lowerText.includes('package'))) {
+      intent = 'track_shipment';
+      const trackingMatch = text.match(/\b([A-Z]{2}\d{9,}[A-Z]{2}|(?:\d\s?){10,})\b/i);
+      if (trackingMatch) extractedEntities.trackingId = trackingMatch[0].replace(/\s/g, '');
+    } else if (lowerText.includes('refund') || lowerText.includes('money back')) {
+      intent = 'process_refund';
+      const orderIdMatch = text.match(/(?:order|#|id)\s*:?\s*(\w+\d+|\d+\w*|\d{3,})/i);
+      if (orderIdMatch) extractedEntities.orderId = orderIdMatch[1];
+      const amountMatch = text.match(/(\$?\d+(?:\.\d{1,2})?)/);
+      if (amountMatch) extractedEntities.amount = parseFloat(amountMatch[1].replace('$', ''));
+    } else if ((lowerText.includes('update') || lowerText.includes('change')) && lowerText.includes('address')) {
+      intent = 'update_shipping_address';
+      const orderIdMatch = text.match(/(?:order|#|id)\s*:?\s*(\w+\d+|\d+\w*|\d{3,})/i);
+      if (orderIdMatch) extractedEntities.orderId = orderIdMatch[1];
+      const addressMatch = text.match(/(?:to|address:)\s*(.*)/i);
+      if (addressMatch) extractedEntities.newAddress = addressMatch[1].trim();
+    } else if (lowerText.includes('reset') && lowerText.includes('password')) {
+      intent = 'reset_password';
+      const emailMatch = text.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6})/);
+      if (emailMatch) extractedEntities.customerEmail = emailMatch[0];
     } else if (lowerText.includes('human') || lowerText.includes('agent') || lowerText.includes('escalate')) {
       intent = 'escalate_to_human';
     } else if (lowerText.endsWith('?') || lowerText.startsWith('what') || lowerText.startsWith('how') || lowerText.startsWith('why')) {
@@ -141,7 +211,8 @@ const adk = {
 
     return {
       intent,
-      entities: entityResult.entities,
+      // Combine entities from Google's service with our custom-extracted ones
+      entities: { ...entityResult.entities, ...extractedEntities },
       originalText: text,
     };
   }
