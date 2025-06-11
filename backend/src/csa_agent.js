@@ -228,8 +228,9 @@ class CSAAgent {
 
         // Initialize Google Vertex AI model (Gemini)
         this.chatModel = new ChatVertexAI({
-            modelName: "gemini-pro", 
-            temperature: 0.7,
+            modelName: "gemini-2.0-flash-001",
+            temperature: 0.2, // Lower temperature for more predictable NLU/routing
+            maxOutputTokens: 1024,
             locationId: "us-central1", 
             authOptions: googleAuthOptions, // Pass loaded credentials
         });
@@ -571,11 +572,15 @@ class CSAAgent {
                     context = "There was an issue accessing the knowledge base.";
                     knowledge_confidence = 0.1;
                 } else {
-                    console.log(`[CSAAgent KB] Retrieved ${retrieved_articles.length} articles. Synthesizing...`);
-                    // Synthesize the content from multiple articles into a single context
-                    context = await this._synthesizeKnowledge(state.user_input, retrieved_articles);
-                    // Confidence is based on the relevance of the top retrieved doc
-                    knowledge_confidence = retrieved_articles[0].relevance || 0.8; 
+                    console.log(`[CSAAgent KB] Retrieved ${retrieved_articles.length} articles. Re-ranking...`);
+                    // ** NEW: Re-rank articles for relevance before synthesis **
+                    const reranked_articles = await this._rerankArticles(state.user_input, retrieved_articles);
+
+                    console.log(`[CSAAgent KB] Synthesizing from top ${reranked_articles.length} re-ranked articles...`);
+                    context = await this._synthesizeKnowledge(state.user_input, reranked_articles);
+                    
+                    // Confidence is based on the relevance of the top *re-ranked* doc
+                    knowledge_confidence = reranked_articles.length > 0 ? (reranked_articles[0].rerank_score || 0.8) : 0.5;
                 }
             } else {
                 console.log("[CSAAgent KB] No articles found for query.");
@@ -594,6 +599,54 @@ class CSAAgent {
             context,
             knowledge_confidence,
         };
+    }
+
+    async _rerankArticles(userInput, articles) {
+        console.log("[CSAAgent RAG] Re-ranking articles for user input:", userInput);
+        const rerankPrompt = new ChatPromptTemplate({
+            inputVariables: ["user_input", "article_content"],
+            template: `On a scale from 0.0 to 1.0, how relevant is the following article to the user's question?
+Provide ONLY the numeric score and nothing else.
+
+User Question: {user_input}
+---
+Article Content:
+{article_content}
+---
+Relevance Score:`,
+        });
+
+        const rerankChain = RunnableSequence.from([
+            rerankPrompt,
+            this.chatModel,
+            new StringOutputParser(),
+        ]);
+
+        const scoredArticles = [];
+        for (const article of articles) {
+            try {
+                const scoreResponse = await rerankChain.invoke({
+                    user_input: userInput,
+                    article_content: article.content,
+                });
+                const score = parseFloat(scoreResponse.trim());
+                if (!isNaN(score)) {
+                    scoredArticles.push({ ...article, rerank_score: score });
+                } else {
+                    scoredArticles.push({ ...article, rerank_score: 0.2 }); // Assign a default low score on parsing failure
+                }
+            } catch (error) {
+                console.error(`[CSAAgent RAG] Error re-ranking article "${article.title}":`, error);
+                // Assign a low score if ranking fails
+                scoredArticles.push({ ...article, rerank_score: 0.1 });
+            }
+        }
+
+        // Sort by the new re-rank score in descending order
+        scoredArticles.sort((a, b) => b.rerank_score - a.rerank_score);
+
+        // Return the top 3 most relevant articles to avoid excessive context
+        return scoredArticles.slice(0, 3);
     }
 
     async _synthesizeKnowledge(userInput, articles) {
@@ -686,78 +739,118 @@ Comprehensive Answer:`,
 
     async _actionWorkflow(state) {
         console.log(`[CSAAgent Action] Routing intent: "${state.intent}" with entities:`, state.entities);
-        let action_result = "No action performed.";
-        // The intent directly maps to the action now, unless there's no action to take.
         let required_action = state.intent;
         const { entities } = state;
+
+        // Structured action result
+        let action_result = {
+            success: false,
+            message: "No action performed.",
+            data: null
+        };
 
         try {
             switch (state.intent) {
                 case 'check_order_status':
-                    if (entities.orderId) {
-                        action_result = await this.integrationService.callIntegrationService('get_order_status', { orderId: entities.orderId });
-                    } else {
-                        action_result = { success: false, message: "I can help with that! What's your order number?" };
+                    try {
+                        if (entities.orderId) {
+                            const data = await this.integrationService.callIntegrationService('get_order_status', { orderId: entities.orderId });
+                            action_result = { success: true, message: "Order status retrieved.", data };
+                        } else {
+                            action_result = { success: false, message: "I can help with that! What's your order number?" };
+                        }
+                    } catch (toolError) {
+                        console.error("[ActionTool Error] check_order_status failed:", toolError);
+                        action_result = { success: false, message: "I couldn't check the order status right now. Please try again in a moment.", error: toolError.message };
                     }
                     break;
 
                 case 'track_shipment':
-                    if (entities.trackingId) {
-                        action_result = await this.integrationService.callIntegrationService('track_shipment', { trackingId: entities.trackingId });
-                    } else {
-                        action_result = { success: false, message: "Of course, what's the tracking number?" };
+                    try {
+                        if (entities.trackingId) {
+                            const data = await this.integrationService.callIntegrationService('track_shipment', { trackingId: entities.trackingId });
+                            action_result = { success: true, message: "Shipment tracked.", data };
+                        } else {
+                            action_result = { success: false, message: "Of course, what's the tracking number?" };
+                        }
+                    } catch (toolError) {
+                        console.error("[ActionTool Error] track_shipment failed:", toolError);
+                        action_result = { success: false, message: "I was unable to track that shipment. Please double-check the tracking number.", error: toolError.message };
                     }
                     break;
                 
                 case 'update_shipping_address':
-                    if (entities.orderId && entities.newAddress) {
-                        action_result = await this.integrationService.callIntegrationService('update_shipping_address', { orderId: entities.orderId, newAddress: entities.newAddress });
-                    } else {
-                        action_result = { success: false, message: "I can help update that. What is the order number and the new full shipping address?" };
+                    try {
+                        if (entities.orderId && entities.newAddress) {
+                            const data = await this.integrationService.callIntegrationService('update_shipping_address', { orderId: entities.orderId, newAddress: entities.newAddress });
+                            action_result = { success: true, message: "Shipping address updated.", data };
+                        } else {
+                            action_result = { success: false, message: "I can help update that. What is the order number and the new full shipping address?" };
+                        }
+                    } catch (toolError) {
+                        console.error("[ActionTool Error] update_shipping_address failed:", toolError);
+                        action_result = { success: false, message: "I failed to update the shipping address. Please ensure the order number is correct.", error: toolError.message };
                     }
                     break;
 
                 case 'process_refund':
-                    if (entities.orderId && entities.amount) {
-                        action_result = await this.integrationService.callIntegrationService('process_refund', { orderId: entities.orderId, amount: entities.amount, reason: entities.reason });
-                    } else {
-                        action_result = { success: false, message: "I can process a refund. What is the order number and the refund amount?" };
+                    try {
+                        if (entities.orderId && entities.amount) {
+                            const data = await this.integrationService.callIntegrationService('process_refund', { orderId: entities.orderId, amount: entities.amount, reason: entities.reason });
+                            action_result = { success: true, message: "Refund processed.", data };
+                        } else {
+                            action_result = { success: false, message: "I can process a refund. What is the order number and the refund amount?" };
+                        }
+                    } catch (toolError) {
+                        console.error("[ActionTool Error] process_refund failed:", toolError);
+                        action_result = { success: false, message: "I encountered an issue processing the refund. Please try again later.", error: toolError.message };
                     }
                     break;
 
                 case 'reset_password':
-                    if (entities.customerEmail) {
-                        action_result = await this.integrationService.callIntegrationService('reset_password', { customerEmail: entities.customerEmail });
-                    } else {
-                        action_result = { success: false, message: "I can help with that. What is the email address for the account?" };
+                    try {
+                        if (entities.customerEmail) {
+                            const data = await this.integrationService.callIntegrationService('reset_password', { customerEmail: entities.customerEmail });
+                            action_result = { success: true, message: "Password reset initiated.", data };
+                        } else {
+                            action_result = { success: false, message: "I can help with that. What is the email address for the account?" };
+                        }
+                    } catch (toolError) {
+                        console.error("[ActionTool Error] reset_password failed:", toolError);
+                        action_result = { success: false, message: "I was unable to initiate a password reset for that email.", error: toolError.message };
                     }
                     break;
 
                 case 'escalate_to_human':
-                    const conversationSummary = this._generateConversationSummary(state);
-                    const ticketArgs = {
-                        title: `Escalation: ${state.user_input.substring(0, 50)}...`,
-                        description: state.user_input,
-                        customer_email: entities.customerEmail || "unknown@customer.com",
-                        priority: state.sentiment?.label === 'negative' ? 'high' : 'medium',
-                        conversation_summary: conversationSummary
-                    };
-                    action_result = await this.tools.hubspot_ticket.invoke(ticketArgs);
-                    console.log("[CSAAgent Action] HubSpot ticket result:", action_result);
+                    try {
+                        const conversationSummary = this._generateConversationSummary(state);
+                        const ticketArgs = {
+                            title: `Escalation: ${state.user_input.substring(0, 50)}...`,
+                            description: state.user_input,
+                            customer_email: entities.customerEmail || "unknown@customer.com",
+                            priority: state.sentiment?.label === 'negative' ? 'high' : 'medium',
+                            conversation_summary: conversationSummary
+                        };
+                        const data = await this.tools.hubspot_ticket.invoke(ticketArgs);
+                        action_result = { success: true, message: "Escalation successful.", data };
+                        console.log("[CSAAgent Action] HubSpot ticket result:", data);
+                    } catch (toolError) {
+                        console.error("[ActionTool Error] escalate_to_human failed:", toolError);
+                        action_result = { success: false, message: "I tried to create a support ticket but failed. Please try again.", error: toolError.message };
+                    }
                     break;
 
                 default:
-                    // For intents like 'ask_question' or 'unknown_intent', no specific action is taken here.
                     required_action = null; 
-                    action_result = "No specific action required for this intent.";
+                    action_result = { success: true, message: "No specific action required for this intent." };
                     console.log(`[CSAAgent Action] No specific action required for intent: "${state.intent}"`);
                     break;
             }
         } catch (error) {
-            console.error(`[CSAAgent Action] Error during action execution for intent "${state.intent}":`, error);
+            console.error(`[CSAAgent Action] Unhandled error during action execution for intent "${state.intent}":`, error);
             action_result = {
                 success: false,
-                message: `I encountered a technical issue while trying to perform the action. Please try again later.`,
+                message: `I encountered a critical technical issue. Please try again later.`,
                 error: error.message
             };
         }
@@ -776,7 +869,7 @@ Comprehensive Answer:`,
             return `User query: ${state.user_input}\nIntent: ${state.intent}\nSentiment: ${state.sentiment?.label || 'neutral'}`;
         }
 
-        const formattedHistory = history.slice(-4).map(msg => { // Last 4 messages
+        const formattedHistory = history.slice(-4).map(msg => {
             if (msg instanceof HumanMessage) return `User: ${msg.content}`;
             if (msg instanceof AIMessage) return `Agent: ${msg.content}`;
             return msg.content;

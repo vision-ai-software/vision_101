@@ -2,10 +2,9 @@
 require('dotenv').config();
 
 const express = require('express');
-const { CSAAgent } = require('./csa_agent'); // Assuming csa_agent.js is in the same directory
-
+const { CSAAgent } = require('./csa_agent');
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8080;
 
 // Enable CORS for frontend communication
 app.use((req, res, next) => {
@@ -20,24 +19,30 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
+// Initialize the CSAAgent. It will be initialized asynchronously.
 let agent;
+let agentInitializationError = null;
 
 async function initializeAgent() {
     try {
+        console.log("[Server] Initializing CSAAgent...");
         agent = new CSAAgent();
-        console.log("CSAAgent initialized successfully.");
-        // You might want to do a warm-up call or check connections here
+        // If CSAAgent had an async initialization method, it would be called here:
+        // await agent.init(); 
+        console.log("[Server] CSAAgent initialized successfully.");
     } catch (error) {
-        console.error("Failed to initialize CSAAgent:", error);
-        // Prevent server from starting if agent fails to initialize
-        process.exit(1); 
+        agentInitializationError = error;
+        console.error("[Server] Failed to initialize CSAAgent:", error);
     }
 }
 
-// Middleware to ensure agent is initialized
+// Middleware to ensure agent is ready before handling requests
 const ensureAgentInitialized = (req, res, next) => {
+    if (agentInitializationError) {
+        return res.status(503).json({ error: "Service Unavailable: Agent failed to initialize." });
+    }
     if (!agent) {
-        return res.status(503).json({ error: "Service Unavailable: Agent not initialized." });
+        return res.status(503).json({ error: "Service Unavailable: Agent is initializing." });
     }
     next();
 };
@@ -66,49 +71,86 @@ app.get('/api/chat', (req, res) => {
     });
 });
 
-app.post('/api/chat', ensureAgentInitialized, async (req, res) => {
-    const { message, thread_id } = req.body;
-
-    if (!message) {
-        return res.status(400).json({ error: "Missing 'message' in request body" });
+// Standard health check endpoint
+app.get('/health', (req, res) => {
+    if (agentInitializationError) {
+        return res.status(503).json({ status: 'UNHEALTHY', error: 'Agent initialization failed' });
     }
-    if (!thread_id) {
-        return res.status(400).json({ error: "Missing 'thread_id' in request body" });
+    if (!agent) {
+        return res.status(503).json({ status: 'INITIALIZING' });
     }
+    res.status(200).json({ status: 'OK' });
+});
 
-    console.log(`[Server] Received message for thread ${thread_id}: ${message}`);
+/**
+ * Main endpoint for the Python wrapper agent to call.
+ * This secures the core agent logic behind a single entry point.
+ */
+app.post('/invoke-agent', ensureAgentInitialized, async (req, res) => {
+    const { userInput, threadId } = req.body;
+
+    if (!userInput || !threadId) {
+        return res.status(400).json({ 
+            error: 'Bad Request: Both "userInput" and "threadId" are required.' 
+        });
+    }
 
     try {
-        const agentResponse = await agent.processMessage(message, thread_id);
-        // The response from processMessage is already a string (final_response)
-        console.log(`[Server] Sending response for thread ${thread_id}:`, agentResponse);
-        res.json({ 
-            reply: agentResponse, 
-            thread_id: thread_id,
-            timestamp: new Date().toISOString()
-        });
+        console.log(`[Server] Invoking agent for threadId: ${threadId}`);
+        const agentResponse = await agent.processMessage(userInput, threadId);
+
+        if (!agentResponse || !agentResponse.final_response) {
+            console.error("[Server] Agent did not return a final response for threadId:", threadId);
+            return res.status(500).json({ error: "Agent processed the request but returned no response." });
+        }
+        
+        console.log(`[Server] Agent returned final response for threadId: ${threadId}`);
+        res.status(200).json({ final_response: agentResponse.final_response });
 
     } catch (error) {
-        console.error(`[Server] Error processing message for thread ${thread_id}:`, error);
-        res.status(500).json({ error: "Failed to process message", details: error.message });
+        console.error(`[Server] Error processing message for threadId ${threadId}:`, error);
+        res.status(500).json({ 
+            error: 'An internal error occurred while processing your request.',
+            details: error.message 
+        });
     }
 });
 
-// Initialize agent and start server
+/**
+ * Deprecated chat endpoint - to be removed after migration.
+ * This ensures backward compatibility during the transition.
+ */
+app.post('/api/chat', (req, res, next) => {
+    console.warn("DEPRECATION WARNING: The /api/chat endpoint is deprecated and will be removed. Use /invoke-agent instead.");
+    
+    const { message, conversationId, thread_id } = req.body;
+    const effectiveUserInput = message;
+    const effectiveThreadId = conversationId || thread_id; // Support both old and new key names
+
+    if (!effectiveUserInput || !effectiveThreadId) {
+        return res.status(400).json({ error: 'Message and conversationId (or thread_id) are required' });
+    }
+
+    // Rewrite the request body and URL to forward it to the new endpoint
+    req.body = { userInput: effectiveUserInput, threadId: effectiveThreadId };
+    req.url = '/invoke-agent';
+
+    // Call the router to handle the rewritten request
+    return app._router.handle(req, res, next);
+});
+
+// Start the server after initializing the agent
 initializeAgent().then(() => {
-    app.listen(port, () => {
-        console.log(`CSA Agent API server listening on port ${port}`);
-        console.log(`Try: curl -X POST http://localhost:${port}/api/chat -H "Content-Type: application/json" -d '{"message": "Hello", "thread_id": "test-thread-123"}'`);
-    });
-}).catch(error => {
-    console.error("Server failed to start due to agent initialization issues:", error);
+    if (!agentInitializationError) {
+        app.listen(port, () => {
+            console.log(`Server is running on port ${port}`);
+            console.log(`Health endpoint available at http://localhost:${port}/health`);
+            console.log(`Agent endpoint available at http://localhost:${port}/invoke-agent`);
+        });
+    } else {
+        console.error("Server will not start because agent initialization failed.");
+        // In a real production environment, this should trigger an alert.
+    }
 });
 
-// Basic health check endpoint
-app.get('/health', (req, res) => {
-    if (agent) {
-        res.status(200).send('OK');
-    } else {
-        res.status(503).send('Agent not initialized');
-    }
-}); 
+module.exports = app; 

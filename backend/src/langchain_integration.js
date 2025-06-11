@@ -200,21 +200,22 @@ const adk = {
       if (addressMatch) extractedEntities.newAddress = addressMatch[1].trim();
     } else if (lowerText.includes('reset') && lowerText.includes('password')) {
       intent = 'reset_password';
-      const emailMatch = text.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6})/);
+      const emailMatch = text.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/);
       if (emailMatch) extractedEntities.customerEmail = emailMatch[0];
-    } else if (lowerText.includes('human') || lowerText.includes('agent') || lowerText.includes('escalate')) {
-      intent = 'escalate_to_human';
-    } else if (lowerText.endsWith('?') || lowerText.startsWith('what') || lowerText.startsWith('how') || lowerText.startsWith('why')) {
-      intent = 'ask_question';
+    } else if (lowerText.includes('help') || lowerText.includes('support') || lowerText.includes('agent')) {
+      intent = 'request_support';
+    } else if (lowerText.includes('thank')) {
+      intent = 'thank_you';
+    } else if (lowerText.includes('goodbye') || lowerText.includes('bye')) {
+      intent = 'goodbye';
+    } else if (lowerText.includes('hello') || lowerText.includes('hi')) {
+      intent = 'greeting';
+    } else {
+      intent = 'general_inquiry';
     }
     // --- End Rule-based Intent Detection ---
 
-    return {
-      intent,
-      // Combine entities from Google's service with our custom-extracted ones
-      entities: { ...entityResult.entities, ...extractedEntities },
-      originalText: text,
-    };
+    return { intent, entities: entityResult.entities, extracted: extractedEntities };
   }
 };
 
@@ -252,9 +253,9 @@ const dialogueManagementService = {
 
 
 // 1. Initialize Models (using ADK/GCP Libraries)
-// Configure with your project, location, and model name (e.g., 'gemini-pro')
+// Configure with your project, location, and model name (e.g., 'gemini-2.0-flash-001')
 const llm = new VertexAI({
-  model: "gemini-pro", // Ensure this model name is correct and available
+  model: "gemini-2.0-flash-001", // Ensure this model name is correct and available
   temperature: 0.7,
   // Add other necessary configurations like project, location if not picked from env
   // safetySettings: [ // Example for Gemini, adjust as per VertexAI SDK
@@ -264,7 +265,7 @@ const llm = new VertexAI({
 
 // For chat models, if using Gemini or similar through a chat-specific interface:
 const chatModel = new ChatGoogleGenerativeAI({ // This might be different based on actual package for Vertex Gemini
-    modelName: "gemini-pro", // or specific chat model
+    modelName: "gemini-2.0-flash-001", // or specific chat model
     temperature: 0.7,
     // safetySettings, etc.
 });
@@ -300,177 +301,170 @@ const nluTool = new Tool({
     }
 });
 
-// 3. Create Prompt Templates
-const qaPromptTemplate = new PromptTemplate({
-  template: `You are a helpful support agent. Answer the following question based on the provided context and conversation history.
-Conversation History:
-{history}
-Context: {context}
-Question: {question}
-Answer:`,
-  inputVariables: ["context", "question", "history"],
-});
+// 3. Define Prompts and Chains
+const qaSystemTemplate = `You are an intelligent assistant for Vision AI. 
+Answer the user's question based on the following knowledge base article.
+If the article doesn't provide a direct answer, say that you couldn't find the information.
+---
+Knowledge Base Article:
+{context}
+---
+User Question:
+{question}
+`;
 
-const escalationPromptTemplate = new PromptTemplate({
-    template: `Summarize the following conversation for a human agent. Identify the customer's issue and what they were trying to achieve.
-Conversation History:
-{history}
-User's last message: {last_message}
-Summary:`,
-    inputVariables: ["history", "last_message"],
-});
+const qaPrompt = PromptTemplate.fromTemplate(qaSystemTemplate);
 
-
-// 4. Set up Memory
-// This memory will typically be scoped per conversation
-const getMemoryForConversation = async (conversationId) => {
-  const { messages: loadedMessages } = await dialogueManagementService.getState(conversationId);
-  
-  const { ChatMessageHistory } = require("langchain/memory"); 
-  const { HumanMessage, AIMessage } = require("@langchain/core/messages"); // Ensure AIMessage is here
-
-  const chatHistory = new ChatMessageHistory();
-  if (loadedMessages && Array.isArray(loadedMessages)) {
-      for (const msg of loadedMessages) {
-          if (msg.type === 'human' && typeof msg.content === 'string') {
-              await chatHistory.addMessage(new HumanMessage(msg.content));
-          } else if (msg.type === 'ai' && typeof msg.content === 'string') {
-              await chatHistory.addMessage(new AIMessage(msg.content));
-          } else {
-              console.warn(`[Memory] Skipping invalid message format from Firestore:`, msg);
-          }
-      }
-  }
-  
-  return new ConversationBufferMemory({
-    memoryKey: "history",
-    inputKey: "question",
-    chatHistory: chatHistory // Pass the populated ChatMessageHistory
-  });
-};
-
-// 5. Build Chains/Logic (Simplified example for now)
-// This is a very basic chain. The document suggests more complex agent executor or conditional logic.
 const qaChain = RunnableSequence.from([
-    qaPromptTemplate,
-    llm, // or chatModel if it's a chat prompt
-    new StringOutputParser(),
+  {
+    context: (input) => adk.callKnowledgeBaseService(input.question),
+    question: (input) => input.question,
+  },
+  qaPrompt,
+  llm, // Using the general llm for Q&A based on a retrieved context
+  new StringOutputParser(),
 ]);
 
 
-// Main handler for incoming messages - to be expanded based on the document's handleMessage
+// 4. Memory Management (using Firestore)
+// Function to get conversation history for a given ID
+const getMemoryForConversation = async (conversationId) => {
+    const memory = new ConversationBufferMemory({
+        memoryKey: "history",
+        inputKey: "question",
+    });
+
+    const doc = await firestore.collection('conversations').doc(conversationId).get();
+    if (doc.exists) {
+        const data = doc.data();
+        // Assuming history is stored as an array of { human: "...", ai: "..." }
+        if (data.history) {
+            for (const turn of data.history) {
+                await memory.chatHistory.addMessages([
+                    new HumanMessage(turn.human),
+                    new SystemMessage(turn.ai), // Or AIMessage depending on Langchain version
+                ]);
+            }
+        }
+    }
+    return memory;
+};
+
+// Function to save conversation history
+const saveMemoryForConversation = async (conversationId, memory) => {
+    const history = await memory.chatHistory.getMessages();
+    // Convert Langchain message objects to a serializable format
+    const serializableHistory = history.map(msg => ({
+        type: msg._getType(),
+        content: msg.content
+    }));
+
+    await firestore.collection('conversations').doc(conversationId).set({
+        history: serializableHistory,
+        last_updated: new Date().toISOString()
+    }, { merge: true });
+};
+
+
+// Main function to process a message
 async function processMessageWithLangchain(messageText, conversationId) {
-  console.log(`[Langchain] Processing message: "${messageText}" for conversation: ${conversationId}`);
-  let response = "I apologize, but I encountered an issue processing your request. Please try again later."; // Default error response
-  let actionTriggered = 'error';
-  let nluResult = { intent: 'unknown_intent', entities: {}, originalText: messageText }; // Default NLU result on error
+    console.log(`[Langchain] Processing message for conversation ${conversationId}: "${messageText}"`);
+    
+    // Step 1: NLU to understand intent and entities
+    const nluResult = await adk.callNluService(messageText);
+    console.log('[Langchain] NLU Result:', nluResult);
+    
+    // Step 2: Route based on intent
+    const intent = nluResult.intent;
+    let response;
 
-  try {
-    const memory = await getMemoryForConversation(conversationId);
+    // Use a switch statement for cleaner routing logic
+    switch (intent) {
+        case 'check_order_status':
+            if (nluResult.extracted && nluResult.extracted.orderId) {
+                response = await adk.callIntegrationService('get_order_status', { orderId: nluResult.extracted.orderId });
+            } else {
+                response = "I can help with that. What is your order ID?";
+            }
+            break;
 
-    // 1. Perform NLU
-    try {
-      nluResult = await adk.callNluService(messageText);
-      console.log("[Langchain] NLU Result:", nluResult);
-    } catch (nluError) {
-      console.error("[Langchain] Error in NLU service:", nluError);
-      // Stick with default error response, or customize for NLU failure
-      // nluResult is already defaulted
-      // No need to re-throw immediately, let it fall to the end to save context and return generic error
+        case 'track_shipment':
+             if (nluResult.extracted && nluResult.extracted.trackingId) {
+                response = await adk.callIntegrationService('track_shipment', { trackingId: nluResult.extracted.trackingId });
+            } else {
+                response = "I can help track your shipment. What is the tracking ID?";
+            }
+            break;
+
+        case 'process_refund':
+            // This might require more complex logic, e.g., a multi-step conversation
+            response = await adk.callIntegrationService('process_refund', { 
+                orderId: nluResult.extracted.orderId, 
+                amount: nluResult.extracted.amount 
+            });
+            break;
+
+        case 'update_shipping_address':
+             if (nluResult.extracted && nluResult.extracted.orderId && nluResult.extracted.newAddress) {
+                response = await adk.callIntegrationService('update_shipping_address', { 
+                    orderId: nluResult.extracted.orderId, 
+                    newAddress: nluResult.extracted.newAddress 
+                });
+            } else {
+                response = "I can help update a shipping address. What is the order ID and the new address?";
+            }
+            break;
+
+        case 'reset_password':
+            if (nluResult.extracted && nluResult.extracted.customerEmail) {
+                response = await adk.callIntegrationService('reset_password', { customerEmail: nluResult.extracted.customerEmail });
+            } else {
+                response = "I can help with that. What is your email address?";
+            }
+            break;
+            
+        case 'request_support':
+        case 'general_inquiry':
+            // For general questions, use the Q&A chain with the knowledge base
+            response = await qaChain.invoke({ question: messageText });
+            break;
+
+        case 'greeting':
+            response = "Hello! How can I help you today?";
+            break;
+            
+        case 'thank_you':
+            response = "You're welcome! Is there anything else I can assist you with?";
+            break;
+
+        case 'goodbye':
+            response = "Goodbye! Have a great day.";
+            break;
+            
+        default:
+            // Fallback to the Q&A chain for unknown intents
+            console.log(`[Langchain] Intent '${intent}' not explicitly handled, falling back to QA chain.`);
+            response = await qaChain.invoke({ question: messageText });
+            break;
     }
 
-    // 2. Dialogue Management Logic (Simplified)
-    // const currentState = await dialogueManagementService.getState(conversationId); // Already loaded for memory
-    const conversationContext = await memory.loadMemoryVariables({});
-    const historyForPrompt = conversationContext.history || "";
-
-    if (nluResult.intent === 'check_order_status' && nluResult.entities && nluResult.entities.orderId) {
-      try {
-        const orderStatus = await adk.callIntegrationService('get_order_status', { orderId: nluResult.entities.orderId });
-        const formatPrompt = new PromptTemplate({
-            template: "Format this order status for a customer in a friendly and concise way: {status}",
-            inputVariables: ["status"]
-        });
-        const formattingChain = RunnableSequence.from([formatPrompt, llm, new StringOutputParser()]);
-        response = await formattingChain.invoke({ status: orderStatus });
-        actionTriggered = 'order_status_checked';
-      } catch (integrationError) {
-        console.error("[Langchain] Error in Integration service (get_order_status):", integrationError);
-        // Default error response is already set
-      }
-    } else if (nluResult.intent === 'ask_question' || nluResult.intent === 'unknown_intent') {
-      try {
-        const kbContext = await knowledgeBaseTool.call(messageText);
-        console.log("[Langchain] KB Context:", kbContext);
-
-        const qaResult = await qaChain.invoke({
-            question: messageText,
-            context: kbContext,
-            history: historyForPrompt
-        });
-        response = qaResult;
-        actionTriggered = 'question_answered';
-      } catch (qaError) {
-        console.error("[Langchain] Error in QA chain or KB Tool:", qaError);
-        // Default error response is already set
-      }
-    } else if (nluResult.intent === 'escalate_to_human') {
-      try {
-        const escalationSummary = await RunnableSequence.from([escalationPromptTemplate, llm, new StringOutputParser()])
-            .invoke({ history: historyForPrompt, last_message: messageText });
-        
-        await adk.callIntegrationService('trigger_human_handoff', {
-            conversationId,
-            summary: escalationSummary,
-            history: historyForPrompt
-        });
-        response = "Okay, I'll connect you with a human agent. I've provided them with a summary of our conversation.";
-        actionTriggered = 'handoff_triggered';
-      } catch (escalationError) {
-        console.error("[Langchain] Error in Escalation or Integration service (trigger_human_handoff):", escalationError);
-        // Default error response is already set
-      }
-    } else { // Fallback for other intents or if NLU failed to produce a known intent
-      try {
-        const clarificationPrompt = new PromptTemplate({
-            template: `The user said: "{userInput}". I'm not sure how to help with that. Ask for clarification or offer general assistance. Conversation history: {history}`,
-            inputVariables: ["userInput", "history"]
-        });
-        const clarificationChain = RunnableSequence.from([clarificationPrompt, llm, new StringOutputParser()]);
-        response = await clarificationChain.invoke({ userInput: messageText, history: historyForPrompt });
-        actionTriggered = 'clarification_provided';
-      } catch (fallbackError) {
-        console.error("[Langchain] Error in Fallback/Clarification chain:", fallbackError);
-        // Default error response is already set
-      }
+    // Step 3: Update and save conversation memory (optional, can be managed by StateGraph)
+    // const memory = await getMemoryForConversation(conversationId);
+    // await memory.chatHistory.addMessages([
+    //     new HumanMessage(messageText),
+    //     new SystemMessage(JSON.stringify(response)), // Storing full response object as AI message
+    // ]);
+    // await saveMemoryForConversation(conversationId, memory);
+    
+    console.log(`[Langchain] Final response for conversation ${conversationId}:`, response);
+    // The response might be an object from a tool, so we may need to format it.
+    if (typeof response === 'object' && response !== null) {
+        return JSON.stringify(response, null, 2);
     }
-
-    // 3. Save conversation history
-    try {
-      await memory.saveContext({ [memory.inputKey || "question"]: messageText }, { "output": response });
-      const updatedMessages = memory.chatHistory.messages;
-      const serializableMessages = updatedMessages.map(msg => {
-          if (msg instanceof HumanMessage) return { type: 'human', content: msg.content };
-          if (msg instanceof AIMessage) return { type: 'ai', content: msg.content };
-          if (msg instanceof SystemMessage) return { type: 'system', content: msg.content };
-          console.warn("[Memory] Unknown message type during serialization:", msg);
-          return { type: 'unknown', content: msg.content || String(msg) };
-      });
-      await dialogueManagementService.saveMessages(conversationId, serializableMessages);
-    } catch (saveError) {
-      console.error("[Langchain] Error saving conversation history:", saveError);
-      // This error might not change the user-facing response, but it's a critical backend issue.
-    }
-
-  } catch (orchestrationError) {
-    console.error("[Langchain] Orchestration error in processMessageWithLangchain:", orchestrationError);
-    // Ensure default error response and action are used if an unexpected error occurs in the main try block
-    // Variables `response`, `actionTriggered` are already defaulted at the beginning.
-  }
-
-  console.log(`[Langchain] Final Response: "${response}", Action: ${actionTriggered}`);
-  return { response, actionTriggered, nluResult };
+    
+    return response;
 }
+
 
 module.exports = {
   processMessageWithLangchain,

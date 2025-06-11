@@ -1,0 +1,10 @@
+# This file lists the Python packages required for the Agent Engine wrapper.
+
+# Core library for Google Cloud AI Platform, including Agent Engine and the ADK
+google-cloud-aiplatform[agent_engines,adk]
+
+# For making HTTP requests to the Node.js agent on Cloud Run
+requests
+
+# For handling authentication to secure the Cloud Run service
+google-auth 
