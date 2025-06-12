@@ -23,6 +23,7 @@ const fetch = require('node-fetch');
 const { Firestore } = require('@google-cloud/firestore'); // Added Firestore import
 const fs = require('fs');
 const path = require('path');
+const adk = require('./adk'); // Added adk import
 
 // Simple in-memory checkpoint saver implementation - Fallback when Firestore fails
 class MemorySaver {
@@ -186,91 +187,48 @@ class FirestoreCheckpointSaver {
 
 class CSAAgent {
     constructor() {
-        // Initialize any LLMs or clients needed by the workflows here
+        // --- Authentication Handled by Application Default Credentials (ADC) ---
+        // The Google Cloud SDKs for Firestore, Vertex AI, and Natural Language
+        // will automatically find their credentials from the environment.
+        // - On Cloud Run/Agent Engine: They use the attached service account.
+        // - On Local Machine: They use `gcloud auth application-default login`.
+        // This removes the need to handle service account key files in the code.
+        console.log("[CSAAgent] Initializing using Application Default Credentials.");
+
+        // --- Initialize Google Cloud Services ---
+        this.languageClient = new LanguageServiceClient();
         
-        // --- Load Service Account Credentials for Google Cloud Services ---
-        let googleAuthOptions = {};
-        const serviceAccountPath = path.join(__dirname, '..', '..', 'service-account', 'vision-101-460206-62ac37f1a9dc.json');
-        try {
-            if (fs.existsSync(serviceAccountPath)) {
-                const credentialsJson = fs.readFileSync(serviceAccountPath, 'utf8');
-                const credentials = JSON.parse(credentialsJson);
-                googleAuthOptions = {
-                    credentials: {
-                        client_email: credentials.client_email,
-                        private_key: credentials.private_key,
-                    },
-                    projectId: credentials.project_id,
-                };
-                console.log("[CSAAgent Constructor] Successfully loaded service account credentials from file.");
-            } else {
-                console.warn(`[CSAAgent Constructor] Service account key file not found at ${serviceAccountPath}. GOOGLE_APPLICATION_CREDENTIALS env var will be used if set.`);
-            }
-        } catch (error) {
-            console.error("[CSAAgent Constructor] Error loading service account credentials:", error);
-            console.warn("[CSAAgent Constructor] Proceeding without directly loaded credentials. GOOGLE_APPLICATION_CREDENTIALS will be used if set.");
-        }
-        // --- End Load Service Account Credentials ---
-
-        // Safe logging without exposing sensitive credentials
-        console.log("[CSAAgent Constructor] googleAuthOptions before FirestoreCheckpointSaver:", {
-            projectId: googleAuthOptions.projectId,
-            hasCredentials: !!(googleAuthOptions.credentials && googleAuthOptions.credentials.client_email),
-            client_email: googleAuthOptions.credentials?.client_email,
-            private_key: googleAuthOptions.credentials?.private_key ? "[REDACTED - PRIVATE KEY PRESENT]" : "[NOT PROVIDED]"
-        });
-
-        // Initialize memory and tools (single initialization)
-        this.memory = new FirestoreCheckpointSaver({ collectionName: 'csa_agent_checkpoints_v1' }, googleAuthOptions);
-        this.tools = this._setupIntegrationTools();
-        
-        this.languageClient = new LanguageServiceClient(googleAuthOptions.projectId ? { projectId: googleAuthOptions.projectId, credentials: googleAuthOptions.credentials } : {}); 
-
-        // Initialize Google Vertex AI model (Gemini)
         this.chatModel = new ChatVertexAI({
             modelName: "gemini-2.0-flash-001",
-            temperature: 0.2, // Lower temperature for more predictable NLU/routing
+            temperature: 0.2, 
             maxOutputTokens: 1024,
-            locationId: "us-central1", 
-            authOptions: googleAuthOptions, // Pass loaded credentials
         });
         
-        // Define a prompt template for context generation from KB articles
-        this.contextGenerationPrompt = new PromptTemplate({
-            template: `Given the following knowledge base article content:
-            ---------------------
-            {article_content}
-            ---------------------
-            And the user's query: "{user_query}"
+        // --- Initialize Firestore Checkpoint Saver ---
+        this.checkpointSaver = new FirestoreCheckpointSaver({ collectionName: 'csa_agent_checkpoints' });
 
-            Extract the most relevant information from the article that directly addresses the user's query.
-            If the article does not contain relevant information for the query, state that clearly.
-            Present the information concisely.
-            Relevant Information:
-            `,
-            inputVariables: ["article_content", "user_query"],
-        });
+        // --- Initialize Services ---
+        this.dbService = { getKnowledgeBaseArticle };
+        this.integrationService = { callIntegrationService: adk.callIntegrationService };
 
-        // Define a simple prompt template for the dialog workflow
-        this.dialogPrompt = new PromptTemplate({
-            template: `You are Vision AI's helpful and friendly customer support agent.
-            Current conversation history:
-            {history}
+        // --- Setup Tools ---
+        this.tools = this._setupIntegrationTools();
 
-            Knowledge base information (if relevant):
-            {context}
+        // --- Create and Compile Workflow ---
+        this.workflow = this._createCsaWorkflow();
+        try {
+            this.app = this.workflow.compile({
+                checkpointer: this.checkpointSaver,
+            });
+            console.log("[CSAAgent] LangGraph workflow compiled successfully.");
+        } catch (error) {
+            console.error("[CSAAgent] Error compiling LangGraph workflow:", error);
+            throw new Error("Failed to compile the agent's workflow.");
+        }
 
-            User's query: {user_input}
-            Intent: {intent}
-            Sentiment: {sentiment}
-
-            Based on all the above, provide a concise and helpful answer to the user's query. If the knowledge base context is not relevant or doesn't answer the question, say you couldn't find specific information but will try to help. If the user asks to escalate or expresses strong negative sentiment, guide them towards escalation if appropriate.
-            Answer:
-            `,
-            inputVariables: ["history", "context", "user_input", "intent", "sentiment"],
-        });
-
-        this.mainWorkflow = this._createCsaWorkflow(); // Moved to end of constructor after client initializations
+        // --- Initialize Dialog Prompt ---
+        // This prompt needs to be initialized after the tools are set up
+        this.dialogPrompt = this._createDialogPrompt();
     }
 
     _setupIntegrationTools() {
@@ -753,11 +711,11 @@ Comprehensive Answer:`,
             switch (state.intent) {
                 case 'check_order_status':
                     try {
-                        if (entities.orderId) {
+                    if (entities.orderId) {
                             const data = await this.integrationService.callIntegrationService('get_order_status', { orderId: entities.orderId });
                             action_result = { success: true, message: "Order status retrieved.", data };
-                        } else {
-                            action_result = { success: false, message: "I can help with that! What's your order number?" };
+                    } else {
+                        action_result = { success: false, message: "I can help with that! What's your order number?" };
                         }
                     } catch (toolError) {
                         console.error("[ActionTool Error] check_order_status failed:", toolError);
@@ -767,11 +725,11 @@ Comprehensive Answer:`,
 
                 case 'track_shipment':
                     try {
-                        if (entities.trackingId) {
+                    if (entities.trackingId) {
                             const data = await this.integrationService.callIntegrationService('track_shipment', { trackingId: entities.trackingId });
                             action_result = { success: true, message: "Shipment tracked.", data };
-                        } else {
-                            action_result = { success: false, message: "Of course, what's the tracking number?" };
+                    } else {
+                        action_result = { success: false, message: "Of course, what's the tracking number?" };
                         }
                     } catch (toolError) {
                         console.error("[ActionTool Error] track_shipment failed:", toolError);
@@ -781,11 +739,11 @@ Comprehensive Answer:`,
                 
                 case 'update_shipping_address':
                     try {
-                        if (entities.orderId && entities.newAddress) {
+                    if (entities.orderId && entities.newAddress) {
                             const data = await this.integrationService.callIntegrationService('update_shipping_address', { orderId: entities.orderId, newAddress: entities.newAddress });
                             action_result = { success: true, message: "Shipping address updated.", data };
-                        } else {
-                            action_result = { success: false, message: "I can help update that. What is the order number and the new full shipping address?" };
+                    } else {
+                        action_result = { success: false, message: "I can help update that. What is the order number and the new full shipping address?" };
                         }
                     } catch (toolError) {
                         console.error("[ActionTool Error] update_shipping_address failed:", toolError);
@@ -795,11 +753,11 @@ Comprehensive Answer:`,
 
                 case 'process_refund':
                     try {
-                        if (entities.orderId && entities.amount) {
+                    if (entities.orderId && entities.amount) {
                             const data = await this.integrationService.callIntegrationService('process_refund', { orderId: entities.orderId, amount: entities.amount, reason: entities.reason });
                             action_result = { success: true, message: "Refund processed.", data };
-                        } else {
-                            action_result = { success: false, message: "I can process a refund. What is the order number and the refund amount?" };
+                    } else {
+                        action_result = { success: false, message: "I can process a refund. What is the order number and the refund amount?" };
                         }
                     } catch (toolError) {
                         console.error("[ActionTool Error] process_refund failed:", toolError);
@@ -809,11 +767,11 @@ Comprehensive Answer:`,
 
                 case 'reset_password':
                     try {
-                        if (entities.customerEmail) {
+                    if (entities.customerEmail) {
                             const data = await this.integrationService.callIntegrationService('reset_password', { customerEmail: entities.customerEmail });
                             action_result = { success: true, message: "Password reset initiated.", data };
-                        } else {
-                            action_result = { success: false, message: "I can help with that. What is the email address for the account?" };
+                    } else {
+                        action_result = { success: false, message: "I can help with that. What is the email address for the account?" };
                         }
                     } catch (toolError) {
                         console.error("[ActionTool Error] reset_password failed:", toolError);
@@ -823,14 +781,14 @@ Comprehensive Answer:`,
 
                 case 'escalate_to_human':
                     try {
-                        const conversationSummary = this._generateConversationSummary(state);
-                        const ticketArgs = {
-                            title: `Escalation: ${state.user_input.substring(0, 50)}...`,
-                            description: state.user_input,
-                            customer_email: entities.customerEmail || "unknown@customer.com",
-                            priority: state.sentiment?.label === 'negative' ? 'high' : 'medium',
-                            conversation_summary: conversationSummary
-                        };
+                    const conversationSummary = this._generateConversationSummary(state);
+                    const ticketArgs = {
+                        title: `Escalation: ${state.user_input.substring(0, 50)}...`,
+                        description: state.user_input,
+                        customer_email: entities.customerEmail || "unknown@customer.com",
+                        priority: state.sentiment?.label === 'negative' ? 'high' : 'medium',
+                        conversation_summary: conversationSummary
+                    };
                         const data = await this.tools.hubspot_ticket.invoke(ticketArgs);
                         action_result = { success: true, message: "Escalation successful.", data };
                         console.log("[CSAAgent Action] HubSpot ticket result:", data);
@@ -1122,14 +1080,13 @@ Comprehensive Answer:`,
         console.log("[CSAAgent] Starting workflow execution...");
         try {
             // Use invoke instead of stream for simpler debugging
-            const finalState = await this.mainWorkflow.invoke(initialState, config);
+            const finalState = await this.workflow.invoke(initialState, config);
             console.log("[CSAAgent] Workflow execution completed successfully");
             return finalState?.final_response || "No response generated.";
         } catch (error) {
             console.error("[CSAAgent] Workflow execution failed:", error);
             throw error;
         }
-
     }
 }
 
